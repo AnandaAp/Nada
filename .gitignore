@@ -1,0 +1,45 @@
+# Rust / Cargo
+/target/
+/src-tauri/target/
+**/*.rs.bk
+
+# Tauri generated
+/src-tauri/gen/schemas/
+
+# Node & Package Managers
+node_modules/
+dist/
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+pnpm-debug.log*
+
+# Nada Runtime Cache & Logs
+*.log
+proxy.log
+rustypipe_cache.json
+rustypipe_reports/
+stream_cache/
+*.tmp
+
+# Temporary Media & Test Dumps
+*.m4a
+*.webm
+*.mp4
+temp_*.m4a
+full_test.m4a
+
+# Operating System Files
+.DS_Store
+Thumbs.db
+desktop.ini
+
+# IDE & Editor Configurations
+.idea/
+.vscode/
+*.swp
+*.swo
+*~
+
+# AI & Codebase Memory Workspace Cache
+.codebase-memory/

@@ -29,6 +29,11 @@
   "bundle": {
     "active": true,
     "targets": ["nsis"],
+    "publisher": "Ananda",
+    "copyright": "Copyright © 2026 Ananda. All rights reserved.",
+    "shortDescription": "Lightweight ad-free desktop music and video player for Windows",
+    "longDescription": "Nada is an ultra-lightweight desktop music and video player built with Tauri v2 and WebView2.",
+    "category": "AudioVideo",
     "icon": [
       "icons/32x32.png",
       "icons/128x128.png",
@@ -39,6 +44,10 @@
     "windows": {
       "webviewInstallMode": {
         "type": "downloadBootstrapper"
+      },
+      "nsis": {
+        "installerIcon": "icons/icon.ico",
+        "displayLanguageSelector": false
       }
     }
   }

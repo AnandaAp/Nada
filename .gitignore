@@ -41,5 +41,11 @@ desktop.ini
 *.swo
 *~
 
+# Certificates & Private Keys
+certificates/
+*.pfx
+*.key
+github-secret-base64.txt
+
 # AI & Codebase Memory Workspace Cache
 .codebase-memory/

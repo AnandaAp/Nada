@@ -200,6 +200,23 @@ Nada includes automated GitHub Actions workflows:
     ```
   - Or trigger manually via the GitHub Actions UI tab (`workflow_dispatch`).
 
+#### 6. Windows SmartScreen & Code Signing
+When downloading the installer (`.exe`) on Windows, Microsoft Defender SmartScreen may display a prompt (*"Windows protected your PC"*) because the binary is an independent open-source release:
+- **Immediate Local Bypass**:
+  - Click **More info** -> Click **Run anyway**.
+  - Or right-click the installer -> **Properties** -> Check **Unblock** -> **Apply**.
+  - Or run: `Unblock-File -Path .\Nada_0.1.0_x64-setup.exe`
+- **1-Click Local Certificate Trust**:
+  - Download `Nada-PublicCert.cer` from the release assets and run:
+    ```powershell
+    certutil -user -addstore Root Nada-PublicCert.cer
+    ```
+- **Automated GitHub Code Signing**:
+  - The release pipeline automatically signs binaries with RFC 3161 timestamps.
+  - To use your own certificate in GitHub Actions, add these repository secrets (**Settings > Secrets and variables > Actions**):
+    - `WINDOWS_CERTIFICATE`: Base64 encoded string of your `.pfx` file (generate using `scripts/create-code-signing-cert.ps1`).
+    - `WINDOWS_CERTIFICATE_PASSWORD`: Export password of the `.pfx`.
+
 ---
 
 <a name="bahasa-indonesia"></a>
@@ -368,6 +385,23 @@ Nada dilengkapi alur kerja otomatis GitHub Actions:
     git push origin v0.1.0
     ```
   - Atau dipicu secara manual melalui tab Actions di antarmuka GitHub (`workflow_dispatch`).
+
+#### 6. Peringatan Windows SmartScreen & Code Signing
+Saat mengunduh installer (`.exe`) di Windows, Microsoft Defender SmartScreen mungkin menampilkan dialog *"Windows protected your PC"* karena aplikasi open-source independen baru belum memiliki sertifikat komersial berbayar:
+- **Cara Melewati Peringatan di PC Anda**:
+  - Klik tombol **Run anyway** (*Tetap jalankan*).
+  - Atau klik kanan file installer -> **Properties** -> centang kotak **Unblock** -> klik **Apply**.
+  - Atau jalankan: `Unblock-File -Path .\Nada_0.1.0_x64-setup.exe`
+- **Memasang Sertifikat Publik Nada (Hilang Selamanya di PC Anda)**:
+  - Unduh `Nada-PublicCert.cer` dari rilis GitHub dan jalankan:
+    ```powershell
+    certutil -user -addstore Root Nada-PublicCert.cer
+    ```
+- **Penandatanganan Otomatis di GitHub Actions**:
+  - Pipeline rilis secara otomatis menandatangani file `.exe` dengan timestamp RFC 3161.
+  - Untuk menggunakan sertifikat pribadi Anda di GitHub Actions, tambahkan secrets berikut di repository GitHub (**Settings > Secrets and variables > Actions**):
+    - `WINDOWS_CERTIFICATE`: String Base64 dari file `.pfx` Anda (buat otomatis via `scripts/create-code-signing-cert.ps1`).
+    - `WINDOWS_CERTIFICATE_PASSWORD`: Password ekspor `.pfx`.
 
 ---
 

@@ -44,8 +44,8 @@ Write-Host "  -> Thumbprint: $($cert.Thumbprint)" -ForegroundColor Green
 # 2. Export PFX
 $pfxPath = Join-Path $outputDir "nada-codesigning.pfx"
 $secPassword = ConvertTo-SecureString -String $Password -Force -AsPlainText
-Write-Host "`n[2/4] Exporting PFX certificate to: $pfxPath..." -ForegroundColor Yellow
-Export-PfxCertificate -Cert $cert -FilePath $pfxPath -Password $secPassword | Out-Null
+Write-Host "`n[2/4] Exporting PFX certificate (TripleDES_SHA1 for CI compatibility) to: $pfxPath..." -ForegroundColor Yellow
+Export-PfxCertificate -Cert $cert -FilePath $pfxPath -Password $secPassword -CryptoAlgorithmOption TripleDES_SHA1 | Out-Null
 Write-Host "  -> PFX saved successfully." -ForegroundColor Green
 
 # 3. Export Public CER & Base64 for GitHub Actions

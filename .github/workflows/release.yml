@@ -66,8 +66,8 @@ jobs:
           if ($env:WINDOWS_CERTIFICATE) {
             Write-Host "Decoding certificate from WINDOWS_CERTIFICATE secret..."
             $certPath = "$env:TEMP\cert.pfx"
-            [System.IO.File]::WriteAllBytes($certPath, [System.Convert]::FromBase64String($env:WINDOWS_CERTIFICATE))
-            $secPassword = ConvertTo-SecureString -String $env:WINDOWS_CERTIFICATE_PASSWORD -Force -AsPlainText
+            [System.IO.File]::WriteAllBytes($certPath, [System.Convert]::FromBase64String($env:WINDOWS_CERTIFICATE.Trim()))
+            $secPassword = ConvertTo-SecureString -String $env:WINDOWS_CERTIFICATE_PASSWORD.Trim() -Force -AsPlainText
             $cert = Import-PfxCertificate -FilePath $certPath -CertStoreLocation Cert:\CurrentUser\My -Password $secPassword
             Remove-Item $certPath -Force
             Write-Host "Imported secret certificate with thumbprint: $($cert.Thumbprint)"

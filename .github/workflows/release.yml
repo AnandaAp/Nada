@@ -1,0 +1,123 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - 'v*'
+  workflow_dispatch:
+    inputs:
+      release_draft:
+        description: 'Publish as draft release'
+        required: false
+        type: boolean
+        default: false
+      prerelease:
+        description: 'Publish as prerelease'
+        required: false
+        type: boolean
+        default: false
+
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  release:
+    name: Build & Release Package
+    permissions:
+      contents: write
+    runs-on: windows-latest
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: 'npm'
+
+      - name: Setup Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Setup Rust cache
+        uses: swatinem/rust-cache@v2
+        with:
+          workspaces: './src-tauri'
+
+      - name: Install npm dependencies
+        run: npm ci
+
+      - name: Run JavaScript unit tests
+        run: npm test
+
+      - name: Run Rust backend tests
+        run: cargo test --manifest-path src-tauri/Cargo.toml
+
+      - name: Build Tauri app & create GitHub Release
+        id: tauri
+        uses: tauri-apps/tauri-action@v0
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        with:
+          tagName: v__VERSION__
+          releaseName: 'Nada v__VERSION__'
+          releaseBody: |
+            ### Nada v__VERSION__
+
+            Lightweight, ad-free desktop music and video player for Windows.
+
+            #### Assets included:
+            - **Installer (NSIS Setup)**: `Nada___VERSION___x64-setup.exe`
+            - **Portable Version**: `Nada-v__VERSION__-windows-portable.zip`
+            - **Checksums**: `SHA256SUMS.txt`
+          releaseDraft: ${{ github.event.inputs.release_draft == true }}
+          prerelease: ${{ github.event.inputs.prerelease == true }}
+
+      - name: Package Portable Executable & Generate Checksums
+        shell: pwsh
+        run: |
+          $version = "${{ steps.tauri.outputs.appVersion }}"
+          if (-not $version) {
+            $version = (Get-Content src-tauri/tauri.conf.json | ConvertFrom-Json).version
+          }
+          "RELEASE_TAG=v$version" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
+
+          New-Item -ItemType Directory -Force -Path "release-extra"
+
+          # 1. Package standalone portable binary
+          $portableFolder = "release-extra/Nada-v$version-portable"
+          New-Item -ItemType Directory -Force -Path $portableFolder
+          Copy-Item "src-tauri/target/release/nada.exe" "$portableFolder/nada.exe"
+          Copy-Item "LICENSE" "$portableFolder/LICENSE" -ErrorAction SilentlyContinue
+          Copy-Item "README.md" "$portableFolder/README.md" -ErrorAction SilentlyContinue
+
+          Compress-Archive -Path "$portableFolder/*" -DestinationPath "release-extra/Nada-v$version-windows-portable.zip" -Force
+          Remove-Item -Recurse -Force $portableFolder
+
+          # 2. Collect generated NSIS installer for SHA256 checksum calculations
+          $nsis = Get-ChildItem -Path "src-tauri/target/release/bundle/nsis/*.exe" -ErrorAction SilentlyContinue | Select-Object -First 1
+
+          # 3. Compute SHA256 checksums
+          $checksumList = @()
+          if ($nsis) {
+            $hashNsis = (Get-FileHash -Path $nsis.FullName -Algorithm SHA256).Hash.ToLower()
+            $checksumList += "$hashNsis  $($nsis.Name)"
+          }
+
+          $portableZip = Get-Item "release-extra/Nada-v$version-windows-portable.zip"
+          $hashZip = (Get-FileHash -Path $portableZip.FullName -Algorithm SHA256).Hash.ToLower()
+          $checksumList += "$hashZip  $($portableZip.Name)"
+
+          $checksumList | Out-File -FilePath "release-extra/SHA256SUMS.txt" -Encoding utf8
+
+      - name: Upload Portable Zip and Checksums to Release
+        uses: softprops/action-gh-release@v2
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        with:
+          tag_name: ${{ github.ref_type == 'tag' && github.ref_name || env.RELEASE_TAG }}
+          files: |
+            release-extra/Nada-*-windows-portable.zip
+            release-extra/SHA256SUMS.txt

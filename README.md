@@ -182,10 +182,23 @@ Both the frontend and backend include automated test suites:
 ```bash
 # Run JavaScript frontend integration tests (24 assertions)
 node app.test.cjs
+# or via npm script:
+npm test
 
 # Run Rust backend unit tests (5 assertions)
 cargo test --manifest-path src-tauri/Cargo.toml
 ```
+
+#### 5. Automated CI/CD & GitHub Releases
+Nada includes automated GitHub Actions workflows:
+- **Continuous Integration (`.github/workflows/ci.yml`)**: Automatically validates JavaScript unit tests, Rust tests, and compilation checks on pull requests and pushes to `main`.
+- **Release Automation (`.github/workflows/release.yml`)**: Automatically builds, packages, and publishes a new GitHub Release with Windows NSIS installer (`.exe`), standalone portable package (`.zip`), and `SHA256SUMS.txt`.
+  - Trigger by pushing a git tag:
+    ```bash
+    git tag v0.1.0
+    git push origin v0.1.0
+    ```
+  - Or trigger manually via the GitHub Actions UI tab (`workflow_dispatch`).
 
 ---
 
@@ -338,10 +351,23 @@ cargo tauri build
 ```bash
 # Menjalankan pengujian integrasi frontend JavaScript (24 pengujian)
 node app.test.cjs
+# atau melalui skrip npm:
+npm test
 
 # Menjalankan pengujian unit backend Rust (5 pengujian)
 cargo test --manifest-path src-tauri/Cargo.toml
 ```
+
+#### 5. Otomasi CI/CD & Rilis GitHub Actions
+Nada dilengkapi alur kerja otomatis GitHub Actions:
+- **Continuous Integration (`.github/workflows/ci.yml`)**: Menguji unit test JavaScript, test backend Rust, dan validasi kompilasi secara otomatis di setiap pull request dan push ke `main`.
+- **Automated Release (`.github/workflows/release.yml`)**: Mengompilasi dan memublikasikan rilis GitHub otomatis yang memuat installer NSIS Windows (`.exe`), paket portabel mandiri (`.zip`), dan `SHA256SUMS.txt`.
+  - Dapat dipicu dengan membuat tag git versi:
+    ```bash
+    git tag v0.1.0
+    git push origin v0.1.0
+    ```
+  - Atau dipicu secara manual melalui tab Actions di antarmuka GitHub (`workflow_dispatch`).
 
 ---
 

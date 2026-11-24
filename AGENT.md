@@ -81,6 +81,8 @@ Autonomous agents must **NEVER** violate the following five core invariants unde
 | `src-tauri/capabilities/default.json` | Tauri Permissions | Minimal permission manifest for Tauri v2 security model. | Principle of least privilege; no shell or filesystem permissions. |
 | `src-tauri/Cargo.toml` | Rust Dependencies | Crate manifests, feature selections, release profile optimizations (`opt-level = "s"`, `lto = true`, `strip = true`). | Minimal dependencies; `reqwest` uses `rustls-tls` to avoid OpenSSL dll dependencies. |
 | `app.test.cjs` | Frontend Unit Tests | Node.js mock environment testing player state machines, shuffle preservation, repeat cycling, and stream synchronization. | 24 automated tests; must pass 100% on every change. |
+| `.github/workflows/ci.yml` | GitHub Actions CI | Automated linting, test suite execution (24 JS tests, 5 Rust tests), and compilation dry-runs on PRs and pushes to main. | Protects repository health on every commit. |
+| `.github/workflows/release.yml` | GitHub Actions Release | Automated packaging and release pipeline for Windows (NSIS installer, portable zip, and SHA256SUMS.txt). Triggered by tag (`v*`) or manual dispatch. | Zero external binary guarantee; signs and publishes official release assets. |
 
 ---
 
@@ -283,6 +285,8 @@ AI Agent **DILARANG KERAS** melanggar kelima invarian inti berikut dalam situasi
 | `src-tauri/capabilities/default.json` | Hak Akses Tauri | Deklarasi hak akses minimal untuk model keamanan Tauri v2. |
 | `src-tauri/Cargo.toml` | Dependensi Rust | Daftar pustaka Rust, profil optimasi rilis (`opt-level = "s"`, `lto = true`, `strip = true`). |
 | `app.test.cjs` | Pengujian Unit Frontend | Lingkungan uji mock Node.js untuk 24 skenario status pemutar, acak, pengulangan, dan sinkronisasi. |
+| `.github/workflows/ci.yml` | GitHub Actions CI | Otomasi pengujian (24 tes JS, 5 tes Rust) dan validasi kompilasi pada pull request serta push ke main. |
+| `.github/workflows/release.yml` | GitHub Actions Release | Pipeline pembuatan paket rilis Windows otomatis (installer NSIS, portable zip, dan SHA256SUMS.txt) via git tag (`v*`) atau pemicu manual. |
 
 ---
 

@@ -11,7 +11,8 @@ tauri-build = { version = "2", features = [] }
 tauri = { version = "2", features = ["tray-icon", "image-png"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
-rustypipe = { version = "0.11", default-features = false, features = ["rustls-tls-webpki-roots"] }
+# Includes the upstream visitor-data panic fix not yet published on crates.io.
+rustypipe = { git = "https://codeberg.org/ThetaDev/rustypipe", rev = "71712e4eda5d78516fa9a5a7c3ab85daf1dc0bbc", default-features = false, features = ["rustls-tls-webpki-roots"] }
 tokio = { version = "1", features = ["rt-multi-thread", "macros", "net", "io-util", "sync", "time"] }
 tiny_http = "0.12"
 reqwest = { version = "0.12", default-features = false, features = ["blocking", "rustls-tls"] }

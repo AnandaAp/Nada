@@ -532,7 +532,8 @@ fn t1_f1_04_zero_external_binary_in_rust_sources() {
         );
     }
     assert!(cargo_toml.contains("rustls-tls"));
-    assert!(cargo_toml.contains("rustypipe = { version = \"0.11\", default-features = false"));
+    assert!(cargo_toml.contains("rustypipe = { git = \"https://codeberg.org/ThetaDev/rustypipe\""));
+    assert!(cargo_toml.contains("default-features = false"));
     assert!(cargo_toml.contains("rustls-tls-webpki-roots"));
     assert!(!cargo_toml.contains("native-tls"));
 }

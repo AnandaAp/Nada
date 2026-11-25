@@ -927,6 +927,23 @@ pub fn patch_base_js(js: &str) -> Result<(String, u64), String> {
     Ok((out, sts))
 }
 
+fn read_jnn_key_from_env_file(path: &std::path::Path) -> Option<String> {
+    let contents = std::fs::read_to_string(path).ok()?;
+    for line in contents.lines() {
+        let line = line.trim();
+        if line.starts_with('#') || line.is_empty() {
+            continue;
+        }
+        if let Some(rest) = line.strip_prefix("NADA_JNN_KEY=") {
+            let val = rest.trim().trim_matches('"').trim_matches('\'');
+            if !val.is_empty() {
+                return Some(val.to_string());
+            }
+        }
+    }
+    None
+}
+
 fn resolve_jnn_api_key() -> Result<String, String> {
     if let Ok(val) = std::env::var("NADA_JNN_KEY") {
         let trimmed = val.trim();
@@ -935,18 +952,18 @@ fn resolve_jnn_api_key() -> Result<String, String> {
         }
     }
     for candidate in [".env", "../.env"] {
-        if let Ok(contents) = std::fs::read_to_string(candidate) {
-            for line in contents.lines() {
-                let line = line.trim();
-                if line.starts_with('#') || line.is_empty() {
-                    continue;
-                }
-                if let Some(rest) = line.strip_prefix("NADA_JNN_KEY=") {
-                    let val = rest.trim().trim_matches('"').trim_matches('\'');
-                    if !val.is_empty() {
-                        return Ok(val.to_string());
-                    }
-                }
+        if let Some(val) = read_jnn_key_from_env_file(std::path::Path::new(candidate)) {
+            return Ok(val);
+        }
+    }
+    #[cfg(debug_assertions)]
+    if let Some(manifest_dir) = option_env!("CARGO_MANIFEST_DIR") {
+        if let Some(repo_env) = std::path::Path::new(manifest_dir)
+            .parent()
+            .map(|p| p.join(".env"))
+        {
+            if let Some(val) = read_jnn_key_from_env_file(&repo_env) {
+                return Ok(val);
             }
         }
     }

@@ -16,6 +16,8 @@ const METADATA_WAIT_TIMEOUT: Duration = Duration::from_secs(5);
 const TLS_METADATA_WAIT_TIMEOUT: Duration = Duration::from_secs(15);
 const MAX_CONSECUTIVE_FAILURES: u32 = 5;
 const MAX_RECONNECTS: u32 = 16;
+const MAX_ALR_HOPS: u32 = 5;
+const MAX_ALR_BODY_BYTES: usize = 8 * 1024;
 const MAX_CONCURRENT_CONNECTIONS: usize = 128;
 const IDLE_KEEPALIVE_TIMEOUT: Duration = Duration::from_secs(30);
 const MAX_HTTP_HEADER_BYTES: usize = 32 * 1024;
@@ -525,6 +527,41 @@ fn sanitize_content_type(mime: &str) -> String {
     }
 }
 
+fn extract_media_type(ct_header: &str) -> String {
+    ct_header
+        .split(';')
+        .next()
+        .unwrap_or("")
+        .trim()
+        .to_ascii_lowercase()
+}
+
+fn is_acceptable_media_type(media_type: &str) -> bool {
+    media_type.starts_with("audio/")
+        || media_type.starts_with("video/")
+        || media_type == "application/octet-stream"
+}
+
+fn parse_alr_redirect_url(raw_body: &[u8], current_url: &str) -> Option<String> {
+    let text = std::str::from_utf8(raw_body).ok()?;
+    let trimmed = text.trim();
+    if trimmed.is_empty() || trimmed.chars().any(|c| c.is_whitespace() || c.is_control()) {
+        return None;
+    }
+    let parsed = reqwest::Url::parse(trimmed).ok()?;
+    if parsed.host_str().is_none() {
+        return None;
+    }
+    let current_is_https = current_url
+        .get(..8)
+        .is_some_and(|p| p.eq_ignore_ascii_case("https://"));
+    match parsed.scheme() {
+        "https" => Some(parsed.to_string()),
+        "http" if !current_is_https => Some(parsed.to_string()),
+        _ => None,
+    }
+}
+
 fn apply_session_headers(
     mut req: reqwest::RequestBuilder,
     headers: &StreamRegisterHeaders,
@@ -578,6 +615,8 @@ fn download_worker(
         }
     };
 
+    let mut current_url = session.url.clone();
+    let mut alr_hops = 0u32;
     let mut offset = 0u64;
     let mut total_size = *session.progress.total.lock().unwrap();
     let mut consecutive_failures = 0u32;
@@ -627,7 +666,7 @@ fn download_worker(
         let range_val = format!("bytes={offset}-");
         let req = apply_session_headers(
             client
-                .get(&session.url)
+                .get(&current_url)
                 .header(reqwest::header::RANGE, &range_val),
             &session.headers,
         );
@@ -707,6 +746,118 @@ fn download_worker(
             continue;
         }
 
+        let ct_header = match resp.headers().get(reqwest::header::CONTENT_TYPE) {
+            None => None,
+            Some(hv) => match hv.to_str() {
+                Ok(s) => Some(s.to_string()),
+                Err(_) => {
+                    let err_msg = "upstream non-UTF-8 Content-Type".to_string();
+                    log_line(&log, format!("download_worker {} {err_msg}", session.token));
+                    *session.progress.error.lock().unwrap() = Some(err_msg);
+                    notify_progress(&session.progress);
+                    break;
+                }
+            },
+        };
+
+        if let Some(ref ct_str) = ct_header {
+            let media_type = extract_media_type(ct_str);
+            if media_type == "text/plain" {
+                if offset > 0 {
+                    let err_msg = format!(
+                        "upstream returned non-media text/plain mid-stream at offset {offset}"
+                    );
+                    log_line(&log, format!("download_worker {} {err_msg}", session.token));
+                    *session.progress.error.lock().unwrap() = Some(err_msg);
+                    notify_progress(&session.progress);
+                    break;
+                }
+                if alr_hops >= MAX_ALR_HOPS {
+                    let err_msg = format!("too many ALR redirects ({alr_hops})");
+                    log_line(&log, format!("download_worker {} {err_msg}", session.token));
+                    *session.progress.error.lock().unwrap() = Some(err_msg);
+                    notify_progress(&session.progress);
+                    break;
+                }
+                if let Some(len) = resp.content_length() {
+                    if len > MAX_ALR_BODY_BYTES as u64 {
+                        let err_msg = format!(
+                            "upstream text/plain body too large ({len} bytes)"
+                        );
+                        log_line(&log, format!("download_worker {} {err_msg}", session.token));
+                        *session.progress.error.lock().unwrap() = Some(err_msg);
+                        notify_progress(&session.progress);
+                        break;
+                    }
+                }
+
+                let mut alr_buf = Vec::new();
+                let mut alr_read_err: Option<String> = None;
+                loop {
+                    if session.progress.is_cancelled.load(Ordering::Acquire) {
+                        break;
+                    }
+                    match rt.block_on(async { resp.chunk().await }) {
+                        Ok(None) => break,
+                        Ok(Some(chunk)) => {
+                            if alr_buf.len() + chunk.len() > MAX_ALR_BODY_BYTES {
+                                alr_read_err = Some(format!(
+                                    "upstream text/plain body exceeded {} bytes",
+                                    MAX_ALR_BODY_BYTES
+                                ));
+                                break;
+                            }
+                            alr_buf.extend_from_slice(&chunk);
+                        }
+                        Err(e) => {
+                            alr_read_err = Some(e.without_url().to_string());
+                            break;
+                        }
+                    }
+                }
+                if session.progress.is_cancelled.load(Ordering::Acquire) {
+                    break;
+                }
+                if let Some(err_msg) = alr_read_err {
+                    log_line(
+                        &log,
+                        format!("download_worker {} ALR read error: {err_msg}", session.token),
+                    );
+                    *session.progress.error.lock().unwrap() = Some(err_msg);
+                    notify_progress(&session.progress);
+                    break;
+                }
+                if let Some(next_url) = parse_alr_redirect_url(&alr_buf, &current_url) {
+                    alr_hops += 1;
+                    consecutive_failures = 0;
+                    current_url = next_url;
+                    log_line(
+                        &log,
+                        format!(
+                            "download_worker {} following ALR redirect hop {alr_hops}",
+                            session.token
+                        ),
+                    );
+                    continue;
+                } else {
+                    let err_msg = format!(
+                        "upstream returned non-media text/plain ({} bytes)",
+                        alr_buf.len()
+                    );
+                    log_line(&log, format!("download_worker {} {err_msg}", session.token));
+                    *session.progress.error.lock().unwrap() = Some(err_msg);
+                    notify_progress(&session.progress);
+                    break;
+                }
+            } else if !is_acceptable_media_type(&media_type) {
+                let err_msg = format!("upstream returned non-media Content-Type: {media_type}");
+                log_line(&log, format!("download_worker {} {err_msg}", session.token));
+                *session.progress.error.lock().unwrap() = Some(err_msg);
+                notify_progress(&session.progress);
+                break;
+            }
+        }
+
         let mut skip_bytes = if status == reqwest::StatusCode::PARTIAL_CONTENT {
             let cr_parsed = resp
                 .headers()
@@ -783,9 +934,16 @@ fn download_worker(
         };
 
         if offset == 0 {
-            if let Some(ct) = resp.headers().get(reqwest::header::CONTENT_TYPE) {
-                if let Ok(mime_str) = ct.to_str() {
-                    *session.progress.mime.lock().unwrap() = mime_str.to_string();
+            if let Some(ct_str) = ct_header {
+                let media_type = extract_media_type(&ct_str);
+                if media_type.starts_with("audio/") || media_type.starts_with("video/") {
+                    *session.progress.mime.lock().unwrap() = ct_str;
+                } else {
+                    let mut mime_guard = session.progress.mime.lock().unwrap();
+                    let cur_mt = extract_media_type(&mime_guard);
+                    if !cur_mt.starts_with("audio/") && !cur_mt.starts_with("video/") {
+                        *mime_guard = ct_str;
+                    }
                 }
             }
         }
@@ -942,6 +1100,7 @@ impl std::io::Read for CacheRangeReader {
             return Ok(0);
         }
 
+        let mut zero_reads = 0u32;
         loop {
             if self.progress.is_cancelled.load(Ordering::Acquire) {
                 let kind = if self.abort_on_cancel {
@@ -963,9 +1122,20 @@ impl std::io::Read for CacheRangeReader {
                     self.pos += n as u64;
                     return Ok(n);
                 }
-                if self.progress.is_complete.load(Ordering::Acquire) {
+                if self.progress.is_complete.load(Ordering::Acquire)
+                    || self.progress.error.lock().unwrap().is_some()
+                {
                     return Ok(0);
                 }
+                zero_reads += 1;
+                if zero_reads > 50 {
+                    return Err(std::io::Error::new(
+                        ErrorKind::UnexpectedEof,
+                        "cache file EOF before downloaded",
+                    ));
+                }
+                std::thread::sleep(Duration::from_millis(10));
+                continue;
             }
 
             if self.progress.is_complete.load(Ordering::Acquire) {
@@ -1044,6 +1214,9 @@ fn parse_http_request(raw: &[u8]) -> Option<ParsedHttpRequest> {
                 }
             }
         } else if key.eq_ignore_ascii_case("content-length") {
+            if val.is_empty() || !val.bytes().all(|b| b.is_ascii_digit()) {
+                return None;
+            }
             match val.parse::<u64>() {
                 Ok(n) if n > 0 => has_body = true,
                 Ok(_) => {}
@@ -1295,7 +1468,11 @@ async fn handle_connection(
 
         let head = req.method == "HEAD";
         let mut progress_rx = session.progress.async_tx.subscribe();
-        let wait_timeout = if session.url.starts_with("https://") {
+        let wait_timeout = if session
+            .url
+            .get(..8)
+            .is_some_and(|p| p.eq_ignore_ascii_case("https://"))
+        {
             TLS_METADATA_WAIT_TIMEOUT
         } else {
             METADATA_WAIT_TIMEOUT
@@ -2572,6 +2749,16 @@ mod tests {
             b"GET /s/abc HTTP/1.1\r\nHost: 127.0.0.1\r\nContent-Length: notanumber\r\n",
         );
         assert!(bad_cl.is_none(), "malformed Content-Length must be rejected");
+
+        let plus_cl = parse_http_request(
+            b"GET /s/abc HTTP/1.1\r\nHost: 127.0.0.1\r\nContent-Length: +5\r\n",
+        );
+        assert!(plus_cl.is_none(), "signed Content-Length (+5) must be rejected");
+
+        let empty_cl = parse_http_request(
+            b"GET /s/abc HTTP/1.1\r\nHost: 127.0.0.1\r\nContent-Length: \r\n",
+        );
+        assert!(empty_cl.is_none(), "empty Content-Length must be rejected");
     }
 
     #[test]
@@ -2656,5 +2843,148 @@ mod tests {
         let resp = test_http().head(&pu).send().unwrap();
         assert_eq!(resp.status(), reqwest::StatusCode::OK);
         assert!(t0.elapsed() < Duration::from_secs(1));
+    }
+
+    #[test]
+    fn alr_text_plain_redirect_follows_and_serves_actual_media() {
+        let up = MockUpstream::start();
+        let media = make_payload(256 * 1024);
+        up.set("/alr/media", MockRoute::new(media.clone(), "video/mp4"));
+
+        let mut hop2 = MockRoute::new(
+            Arc::new(up.url("/alr/media").into_bytes()),
+            "text/plain",
+        );
+        hop2.force_200_ignore_range = true;
+        up.set("/alr/hop2", hop2);
+
+        let mut hop1 = MockRoute::new(
+            Arc::new(format!("{}\r\n", up.url("/alr/hop2")).into_bytes()),
+            "text/plain; charset=utf-8",
+        );
+        hop1.force_200_ignore_range = true;
+        up.set("/alr/hop1", hop1);
+
+        let env = TempEnv::new("alr_ok");
+        let proxy = env.proxy();
+        let pu = proxy.register(&up.url("/alr/hop1"), None, Some("video/mp4"));
+
+        let head = test_http().head(&pu).send().unwrap();
+        assert_eq!(head.status(), reqwest::StatusCode::OK);
+        assert_eq!(
+            head.headers().get("content-type").and_then(|v| v.to_str().ok()),
+            Some("video/mp4")
+        );
+        assert_eq!(
+            head.headers().get("content-length").and_then(|v| v.to_str().ok()),
+            Some("262144")
+        );
+
+        let get = test_http().get(&pu).send().unwrap();
+        assert_eq!(get.status(), reqwest::StatusCode::OK);
+        assert_eq!(
+            get.headers().get("content-type").and_then(|v| v.to_str().ok()),
+            Some("video/mp4")
+        );
+        let body = get.bytes().unwrap();
+        assert_eq!(&body[..], &media[..]);
+
+        let seek = test_http()
+            .get(&pu)
+            .header("Range", "bytes=65536-131071")
+            .send()
+            .unwrap();
+        assert_eq!(seek.status(), reqwest::StatusCode::PARTIAL_CONTENT);
+        assert_eq!(&seek.bytes().unwrap()[..], &media[65536..=131071]);
+
+        // Also test when session initially had mime=None and target is audio/webm
+        up.set("/alr/audio", MockRoute::new(media.clone(), "audio/webm; codecs=\"opus\""));
+        let mut hop_a = MockRoute::new(
+            Arc::new(up.url("/alr/audio").into_bytes()),
+            "text/plain",
+        );
+        hop_a.force_200_ignore_range = true;
+        up.set("/alr/hop_a", hop_a);
+        let pu_a = proxy.register(&up.url("/alr/hop_a"), None, None);
+        let resp_a = test_http().get(&pu_a).send().unwrap();
+        assert_eq!(resp_a.status(), reqwest::StatusCode::OK);
+        assert_eq!(
+            resp_a.headers().get("content-type").and_then(|v| v.to_str().ok()),
+            Some("audio/webm; codecs=\"opus\"")
+        );
+        assert_eq!(&resp_a.bytes().unwrap()[..], &media[..]);
+    }
+
+    #[test]
+    fn non_media_content_type_and_alr_loop_rejected_with_502() {
+        let up = MockUpstream::start();
+
+        // 1. text/plain non-URL body -> 502, never 200 OK text/plain
+        let mut text_err = MockRoute::new(
+            Arc::new(b"Error 403: edge rejected request".to_vec()),
+            "text/plain",
+        );
+        text_err.force_200_ignore_range = true;
+        up.set("/nonmedia/text", text_err);
+
+        // 2. text/html error page -> 502
+        let mut html_err = MockRoute::new(
+            Arc::new(b"<html><body>blocked</body></html>".to_vec()),
+            "text/html; charset=utf-8",
+        );
+        html_err.force_200_ignore_range = true;
+        up.set("/nonmedia/html", html_err);
+
+        // 3. ALR loop (> MAX_ALR_HOPS) -> 502
+        let mut loop_a = MockRoute::new(
+            Arc::new(up.url("/nonmedia/loop_b").into_bytes()),
+            "text/plain",
+        );
+        loop_a.force_200_ignore_range = true;
+        let mut loop_b = MockRoute::new(
+            Arc::new(up.url("/nonmedia/loop_a").into_bytes()),
+            "text/plain",
+        );
+        loop_b.force_200_ignore_range = true;
+        up.set("/nonmedia/loop_a", loop_a);
+        up.set("/nonmedia/loop_b", loop_b);
+
+        let env = TempEnv::new("nonmedia");
+        let proxy = env.proxy();
+
+        let p_text = proxy.register(&up.url("/nonmedia/text"), None, Some("video/mp4"));
+        let r_text = test_http().get(&p_text).send().unwrap();
+        assert_eq!(r_text.status(), reqwest::StatusCode::BAD_GATEWAY);
+        {
+            let tok = p_text.rsplit('/').next().unwrap();
+            let reg = proxy.registry.lock().unwrap();
+            let sess = reg.sessions.get(tok).unwrap();
+            assert_eq!(&*sess.progress.mime.lock().unwrap(), "video/mp4");
+            assert!(!sess.progress.is_complete.load(Ordering::Acquire));
+            assert!(sess.progress.total.lock().unwrap().is_none());
+        }
+
+        let p_html = proxy.register(&up.url("/nonmedia/html"), Some(33), Some("audio/mp4"));
+        assert_eq!(
+            test_http().head(&p_html).send().unwrap().status(),
+            reqwest::StatusCode::BAD_GATEWAY
+        );
+        assert_eq!(
+            test_http().get(&p_html).send().unwrap().status(),
+            reqwest::StatusCode::BAD_GATEWAY
+        );
+
+        let p_loop = proxy.register(&up.url("/nonmedia/loop_a"), None, Some("video/mp4"));
+        assert_eq!(
+            test_http().get(&p_loop).send().unwrap().status(),
+            reqwest::StatusCode::BAD_GATEWAY
+        );
+
+        // parse_alr_redirect_url downgrade & validation checks
+        assert!(parse_alr_redirect_url(b"https://cdn.example/v?a=1\n", "https://edge.example/v").is_some());
+        assert!(parse_alr_redirect_url(b"http://cdn.example/v", "https://edge.example/v").is_none());
+        assert!(parse_alr_redirect_url(b"http://127.0.0.1:8080/v", "http://127.0.0.1:8080/a").is_some());
+        assert!(parse_alr_redirect_url(b"not a url", "http://127.0.0.1:8080/a").is_none());
+        assert!(parse_alr_redirect_url(b"ftp://cdn.example/v", "http://127.0.0.1:8080/a").is_none());
     }
 }

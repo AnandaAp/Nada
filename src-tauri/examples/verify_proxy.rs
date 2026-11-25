@@ -230,6 +230,16 @@ async fn fetch_full_and_verify_head(
         "{label}: expected 200 OK on HEAD, got {}",
         head.status()
     );
+    let head_ct = head
+        .headers()
+        .get(reqwest::header::CONTENT_TYPE)
+        .and_then(|v| v.to_str().ok())
+        .unwrap_or("");
+    let head_ct_lc = head_ct.to_ascii_lowercase();
+    assert!(
+        head_ct_lc.starts_with("audio/") || head_ct_lc.starts_with("video/"),
+        "{label}: HEAD Content-Type must be audio/* or video/*, got {head_ct:?}"
+    );
     let expected_len: u64 = head
         .headers()
         .get(reqwest::header::CONTENT_LENGTH)
@@ -251,6 +261,16 @@ async fn fetch_full_and_verify_head(
         reqwest::StatusCode::OK,
         "{label}: expected 200 OK on full GET, got {}",
         resp.status()
+    );
+    let get_ct = resp
+        .headers()
+        .get(reqwest::header::CONTENT_TYPE)
+        .and_then(|v| v.to_str().ok())
+        .unwrap_or("");
+    let get_ct_lc = get_ct.to_ascii_lowercase();
+    assert!(
+        get_ct_lc.starts_with("audio/") || get_ct_lc.starts_with("video/"),
+        "{label}: GET Content-Type must be audio/* or video/*, got {get_ct:?}"
     );
     let mut data = Vec::with_capacity(expected_len as usize);
     while let Some(chunk) = resp.chunk().await.expect("stream chunk") {
@@ -478,6 +498,12 @@ fn main() {
                 }
             }
 
+            if is_music {
+                assert!(
+                    !streams.muxed.is_empty(),
+                    "{title}: expected at least 1 muxed stream"
+                );
+            }
             if let Some(m) = streams.muxed.first() {
                 let m_bytes = fetch_full_and_verify_head(
                     &http_client,
@@ -485,14 +511,24 @@ fn main() {
                     &format!("{title} muxed itag={} ({})", m.itag, m.quality),
                 )
                 .await;
-                if m_bytes.len() > 4_300_000 {
+                if is_music {
+                    assert!(
+                        m_bytes.len() > 1_048_576,
+                        "{title} muxed must exceed 1 MiB (1:04 boundary), got {}",
+                        m_bytes.len()
+                    );
+                    let fwd_start = if m_bytes.len() > 4_300_000 {
+                        4_194_304
+                    } else {
+                        1_048_576
+                    };
                     verify_seek_slice(
                         &http_client,
                         &m.url,
                         &m_bytes,
-                        4_194_304,
-                        Some(4_259_839),
-                        &format!("{title} muxed fwd>4MiB"),
+                        fwd_start,
+                        Some((fwd_start + 65_535).min(m_bytes.len() - 1)),
+                        &format!("{title} muxed fwd>1MiB"),
                     )
                     .await;
                     verify_seek_slice(
@@ -540,6 +576,10 @@ fn main() {
     assert!(
         !log_content.contains("504 timeout"),
         "Unexpected 504 timeout in proxy.log"
+    );
+    assert!(
+        !log_content.contains("mime=text/plain"),
+        "Unexpected mime=text/plain served by proxy in proxy.log"
     );
 
     drop(bg);

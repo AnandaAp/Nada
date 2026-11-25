@@ -288,6 +288,35 @@ test('failed split startup stops both elements without skipping', async () => {
   assert.equal(p.video.paused, true);
   assert.equal(p.state.mode, null);
   assert.equal(p.state.index, 0);
+  assert.equal(p.get('player').classList.contains('is-loading'), false);
+  assert.equal(p.get('pMetaSkeleton').classList.contains('hidden'), true);
+});
+
+test('playback skeleton follows stream loading and buffering', async () => {
+  let resolveStreams;
+  const p = queued(async command => command === 'streams' ? new Promise(resolve => { resolveStreams = resolve; }) : undefined);
+  assert.equal(p.get('pMetaSkeleton').classList.contains('hidden'), true);
+
+  const startup = p.playCurrent();
+  assert.equal(p.get('player').classList.contains('is-loading'), true);
+  assert.equal(p.get('pMetaSkeleton').classList.contains('hidden'), false);
+  assert.equal(p.get('playLoading').classList.contains('hidden'), false);
+
+  resolveStreams(streams);
+  await startup;
+  assert.equal(p.get('player').classList.contains('is-loading'), false);
+  assert.equal(p.get('pMetaSkeleton').classList.contains('hidden'), true);
+
+  p.video.readyState = 2;
+  p.video.emit('waiting');
+  assert.equal(p.get('player').classList.contains('is-loading'), true);
+  assert.equal(p.get('pMetaSkeleton').classList.contains('hidden'), false);
+
+  p.video.readyState = 4;
+  p.video.emit('canplay');
+  await new Promise(resolve => setImmediate(resolve));
+  assert.equal(p.get('player').classList.contains('is-loading'), false);
+  assert.equal(p.get('playLoading').classList.contains('hidden'), true);
 });
 
 test('buffering pauses audio and does not repeatedly seek video', async () => {
@@ -359,12 +388,15 @@ test('pause while fetching invalidates the pending startup', async () => {
   let resolveStream;
   const p = queued(async command => command === 'streams' ? new Promise(resolve => { resolveStream = resolve; }) : undefined);
   const startup = p.playCurrent();
+  assert.equal(p.get('player').classList.contains('is-loading'), true);
   await p.togglePlay();
+  assert.equal(p.get('player').classList.contains('is-loading'), false);
   resolveStream(streams);
   await startup;
   assert.equal(p.state.mode, null);
   assert.equal(p.state.wantPlaying, false);
   assert.equal(p.audio.paused, true);
+  assert.equal(p.get('pMetaSkeleton').classList.contains('hidden'), true);
 });
 
 test('late radio response cannot replace a newer track', async () => {

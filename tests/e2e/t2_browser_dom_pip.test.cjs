@@ -560,3 +560,105 @@ test("T2-F7-05: post-browser check confirms zero repo target nada.exe processes 
     assert.equal((p.Path || "").toLowerCase().startsWith(repoTarget), false);
   }
 });
+
+test("T2-F7-06: playback skeleton shimmers without layout shift and clears when audio starts", async () => {
+  const h = await createBrowserHarness({ width: 430, height: 640 });
+  try {
+    const { vUrl, aUrl } = buildSplitIpc(h);
+    h.appServer.setIpcHandler("search", async () => [
+      { id: "skeleton", name: "Skeleton Song", artist: "Nada", duration: 80, video: false },
+    ]);
+
+    let releaseStreams;
+    let markRequested;
+    const streamsRequested = new Promise((resolve) => { markRequested = resolve; });
+    h.appServer.setIpcHandler("streams", async () => {
+      markRequested();
+      return new Promise((resolve) => { releaseStreams = resolve; });
+    });
+
+    await h.edge.evaluate(() => {
+      document.getElementById("search").value = "Skeleton";
+      document.getElementById("searchBtn").click();
+    });
+    await h.edge.waitFor(() => document.querySelectorAll(".result").length === 1);
+    const beforeHeight = await h.edge.evaluate(() => document.getElementById("player").getBoundingClientRect().height);
+    await h.edge.clickSelector(".result");
+    await streamsRequested;
+    await h.edge.waitFor(() => document.getElementById("player").classList.contains("is-loading"));
+    await h.edge.waitFor(
+      () => Number(getComputedStyle(document.getElementById("pMetaSkeleton")).opacity) > 0.9,
+      { timeoutMs: 1000, label: "skeleton visible" }
+    );
+
+    const loading = await h.edge.evaluate(() => {
+      const player = document.getElementById("player");
+      const skeleton = document.getElementById("pMetaSkeleton");
+      const line = document.querySelector(".skeleton-line");
+      return {
+        busy: player.getAttribute("aria-busy"),
+        skeletonDisplay: getComputedStyle(skeleton).display,
+        titleVisibility: getComputedStyle(document.getElementById("pTitle")).visibility,
+        spinnerDisplay: getComputedStyle(document.getElementById("playLoading")).display,
+        shimmerAnimation: getComputedStyle(line, "::after").animationName,
+        playerHeight: player.getBoundingClientRect().height,
+        scrollWidth: document.documentElement.scrollWidth,
+      };
+    });
+    assert.equal(loading.busy, "true");
+    assert.notEqual(loading.skeletonDisplay, "none");
+    assert.equal(loading.titleVisibility, "hidden");
+    assert.notEqual(loading.spinnerDisplay, "none");
+    assert.equal(loading.shimmerAnimation, "skeleton-shimmer");
+    assert.ok(Math.abs(loading.playerHeight - beforeHeight) <= 0.5, "loading skeleton must not change player height");
+    assert.ok(loading.scrollWidth <= 430, `Horizontal overflow while loading: ${loading.scrollWidth}`);
+
+    releaseStreams({
+      muxed: [],
+      video_only: [{ url: vUrl, mime: h.fixtures.video16x9.mime, quality: "360p", height: 180 }],
+      audio: [{ url: aUrl, mime: h.fixtures.audioMain.mime, bitrate: 176400 }],
+      expires_in_seconds: 21600,
+    });
+    await h.edge.waitFor(
+      () => {
+        const audio = document.getElementById("audio");
+        return !audio.paused && audio.readyState >= 3 && !document.getElementById("player").classList.contains("is-loading");
+      },
+      { label: "audio playing and skeleton cleared" }
+    );
+
+    const ready = await h.edge.evaluate(() => ({
+      busy: document.getElementById("player").getAttribute("aria-busy"),
+      skeletonDisplay: getComputedStyle(document.getElementById("pMetaSkeleton")).display,
+      titleVisibility: getComputedStyle(document.getElementById("pTitle")).visibility,
+      spinnerDisplay: getComputedStyle(document.getElementById("playLoading")).display,
+    }));
+    assert.equal(ready.busy, "false");
+    assert.equal(ready.skeletonDisplay, "none");
+    assert.equal(ready.titleVisibility, "visible");
+    assert.equal(ready.spinnerDisplay, "none");
+
+    await h.edge.send("Emulation.setEmulatedMedia", {
+      features: [{ name: "prefers-reduced-motion", value: "reduce" }],
+    });
+    const reducedMotion = await h.edge.evaluate(() => {
+      const line = document.createElement("span");
+      line.className = "skeleton-line";
+      const spinner = document.createElement("span");
+      spinner.className = "play-loading";
+      document.body.append(line, spinner);
+      const result = {
+        shimmer: getComputedStyle(line, "::after").animationName,
+        spinner: getComputedStyle(spinner).animationName,
+      };
+      line.remove();
+      spinner.remove();
+      return result;
+    });
+    assert.equal(reducedMotion.shimmer, "none");
+    assert.equal(reducedMotion.spinner, "none");
+    assert.deepEqual(h.edge.pageErrors, []);
+  } finally {
+    await h.close();
+  }
+});

@@ -328,7 +328,17 @@ function setStatus(text, loading = false) {
   el.classList.remove("hidden");
 }
 
+function syncPlaybackLoadingUI() {
+  const loading = Boolean(state.starting || state.buffering || state.recovering);
+  const player = $("player");
+  player.classList.toggle("is-loading", loading);
+  player.setAttribute("aria-busy", String(loading));
+  $("pMetaSkeleton").classList.toggle("hidden", !loading);
+  $("playLoading").classList.toggle("hidden", !loading);
+}
+
 function setPlaybackStatus(text, loading = false) {
+  syncPlaybackLoadingUI();
   if (state.loading) return;
   setStatus(text, loading);
 }
@@ -507,22 +517,27 @@ window.onYouTubeIframeAPIReady = function () {
           if (event.data === YT.PlayerState.PLAYING) {
             state.wantPlaying = true;
             state.starting = false;
+            state.buffering = false;
             setPlaybackStatus(null);
             setPlayingUI(true);
           } else if (event.data === YT.PlayerState.PAUSED) {
             state.wantPlaying = false;
+            state.buffering = false;
             setPlayingUI(false);
           } else if (event.data === YT.PlayerState.ENDED) {
             state.wantPlaying = false;
+            state.buffering = false;
             setPlayingUI(false);
             next(true);
           } else if (event.data === YT.PlayerState.BUFFERING) {
+            state.buffering = true;
             setPlaybackStatus("Buffering…", true);
           }
         },
         onError: (event) => {
           if (state.mode !== "yt") return;
           console.error("YouTube Player error:", event.data);
+          state.buffering = false;
           setPlaybackStatus(null);
           setPlayingUI(false);
           toast("Lagu tidak dapat diputar. Memutar lagu berikutnya…");
@@ -721,6 +736,7 @@ async function playCurrent(position = 0, wantPlaying = true) {
   state.lastRecoveryAt = 0;
   state.radioPendingId = 0;
   stopAll();
+  syncPlaybackLoadingUI();
   state.streams = null;
 
   $("pTitle").textContent = t.name;
@@ -922,7 +938,10 @@ async function playCurrentNative(t, position, wantPlaying, playbackId) {
     }
     failPlayback(`Gagal muter: ${e}`);
   } finally {
-    if (playbackId === state.playbackId) state.starting = false;
+    if (playbackId === state.playbackId) {
+      state.starting = false;
+      syncPlaybackLoadingUI();
+    }
   }
 }
 
@@ -1191,7 +1210,10 @@ async function recoverPlayback(reason, failedEl = null) {
       setPlaybackStatus(null);
     }
   } finally {
-    if (playbackId === state.playbackId) state.recovering = false;
+    if (playbackId === state.playbackId) {
+      state.recovering = false;
+      syncPlaybackLoadingUI();
+    }
   }
 }
 
@@ -1212,11 +1234,13 @@ function failPlayback(message) {
 function setPlayingUI(playing) {
   $("iconPlay").classList.toggle("hidden", playing);
   $("iconPause").classList.toggle("hidden", !playing);
+  syncPlaybackLoadingUI();
 }
 
 async function togglePlay() {
   if (state.mode === "yt" && ytPlayer && ytReady) {
     state.wantPlaying = !state.wantPlaying;
+    state.buffering = state.wantPlaying;
     if (state.wantPlaying) {
       try { ytPlayer.playVideo(); } catch (_) {}
     } else {
@@ -1248,6 +1272,8 @@ async function togglePlay() {
   }
   const els = state.mode === "split" ? [audio, video] : [activeEl()];
   const playbackId = state.playbackId;
+  state.buffering = state.wantPlaying;
+  syncPlaybackLoadingUI();
   try {
     if (!state.wantPlaying) els.forEach((el) => programmaticPause(el));
     else await Promise.all(els.map((el) => programmaticPlay(el)));
@@ -1772,6 +1798,7 @@ document.addEventListener("keydown", (e) => {
 listen("nada://toggle-play", () => togglePlay());
 
 video.addEventListener("click", togglePlay);
+syncPlaybackLoadingUI();
 updateModeButtonsUI();
 renderHome();
 loadHome();

@@ -334,12 +334,20 @@ test("T1-F6-06: src/index.html contains all required player, video, PiP, and rec
     "homeBtn", "refreshHome", "home", "homeSections", "collectionHead", "backHome",
     "search", "clearSearch", "searchBtn", "tabTracks", "tabVideos", "results",
     "empty", "status", "queuePanel", "queueList", "queueClose",
-    "videoStage", "ytPlayer", "video", "pipBtn", "audio",
-    "curTime", "progress", "durTime", "pCover", "pTitle", "pArtist",
-    "prevBtn", "playBtn", "iconPlay", "iconPause", "nextBtn",
+    "videoStage", "ytPlayer", "video", "pipBtn", "audio", "player",
+    "curTime", "progress", "durTime", "pCover", "pTitle", "pArtist", "pMetaSkeleton",
+    "prevBtn", "playBtn", "playLoading", "iconPlay", "iconPause", "nextBtn",
     "repeatBtn", "repeatBadge", "shuffleBtn", "videoBtn", "volume", "queueBtn", "toast",
   ];
   for (const id of requiredIds) {
     assert.ok(new RegExp(`id="${id}"`).test(html), `Missing required DOM id #${id}`);
   }
+});
+
+test("T1-F7-01: playback skeleton reserves metadata space and respects reduced motion", () => {
+  const css = fs.readFileSync(path.join(SRC_DIR, "styles.css"), "utf8");
+  assert.match(css, /\.pmeta-skeleton\s*\{[^}]*position:\s*absolute/s);
+  assert.match(css, /\.skeleton-line::after\s*\{[^}]*animation:\s*skeleton-shimmer/s);
+  assert.match(css, /\.player\.is-loading\s+\.ptitle,[\s\S]*?\.player\.is-loading\s+\.partist\s*\{[^}]*visibility:\s*hidden/s);
+  assert.match(css, /@media\s*\(prefers-reduced-motion:\s*reduce\)\s*\{[\s\S]*?\.skeleton-line::after\s*\{\s*animation:\s*none/s);
 });

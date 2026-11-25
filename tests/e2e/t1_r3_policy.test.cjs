@@ -93,6 +93,7 @@ test("T1-F7-05: zero external sidecar binaries exist in repository", () => {
 test("T1-F7-06: Cargo.toml uses rustls-tls and Rust sources never spawn external binaries", () => {
   const cargoToml = fs.readFileSync(path.join(TAURI_DIR, "Cargo.toml"), "utf8");
   assert.match(cargoToml, /reqwest\s*=\s*\{[^}]*default-features\s*=\s*false[^}]*rustls-tls/);
+  assert.match(cargoToml, /rustypipe\s*=\s*\{[^}]*default-features\s*=\s*false[^}]*rustls-tls-webpki-roots/);
   assert.doesNotMatch(cargoToml, /native-tls/);
 
   const rsFiles = walkFiles(path.join(TAURI_DIR, "src"), (p) => p.endsWith(".rs"));

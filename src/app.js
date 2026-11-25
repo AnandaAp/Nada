@@ -794,7 +794,8 @@ async function playCurrentNative(t, position, wantPlaying, playbackId) {
         }
         if (!started && (!videoCandidates.length || !audioCandidates.length)) {
           if (state.wantPlaying) {
-            failPlayback("Gagal muter stream video.");
+            if (video.error) await recoverPlayback("startup-error", video);
+            else failPlayback("Gagal muter stream video.");
             return;
           }
         }
@@ -849,7 +850,9 @@ async function playCurrentNative(t, position, wantPlaying, playbackId) {
           }
         }
         if (!started && state.wantPlaying) {
-          failPlayback(`Gagal muter: ${lastErr}`);
+          const failedEl = video.error ? video : audio.error ? audio : null;
+          if (failedEl) await recoverPlayback("startup-error", failedEl);
+          else failPlayback(`Gagal muter: ${lastErr}`);
           return;
         }
       }
@@ -884,7 +887,10 @@ async function playCurrentNative(t, position, wantPlaying, playbackId) {
         }
       }
       if (!played && state.wantPlaying) {
-        if (playbackId === state.playbackId) failPlayback("Gagal muter stream audio.");
+        if (playbackId === state.playbackId) {
+          if (audio.error) await recoverPlayback("startup-error", audio);
+          else failPlayback("Gagal muter stream audio.");
+        }
         return;
       }
     }
@@ -1558,7 +1564,7 @@ if (typeof window !== "undefined" && typeof window.addEventListener === "functio
   window.addEventListener("pointerup", clearSeeking);
 }
 
-const savedVol = localStorage.getItem("nada.volume");
+const savedVol = getStorage("nada.volume");
 $("volume").value = savedVol !== null ? savedVol : 80;
 audio.volume = $("volume").value / 100;
 video.volume = $("volume").value / 100;
@@ -1570,7 +1576,7 @@ $("volume").addEventListener("input", () => {
   const v = val / 100;
   audio.volume = v;
   video.volume = v;
-  localStorage.setItem("nada.volume", $("volume").value);
+  setStorage("nada.volume", $("volume").value);
 });
 
 setInterval(() => {

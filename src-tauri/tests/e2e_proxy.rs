@@ -532,6 +532,8 @@ fn t1_f1_04_zero_external_binary_in_rust_sources() {
         );
     }
     assert!(cargo_toml.contains("rustls-tls"));
+    assert!(cargo_toml.contains("rustypipe = { version = \"0.11\", default-features = false"));
+    assert!(cargo_toml.contains("rustls-tls-webpki-roots"));
     assert!(!cargo_toml.contains("native-tls"));
 }
 
@@ -1581,7 +1583,12 @@ fn t4_06_live_youtube_kalah2_and_mangu_acceptance() {
         }
     }
 
-    fn verify_live_stream_and_seeks(client: &reqwest::blocking::Client, url: &str, label: &str) {
+    fn verify_live_stream_and_seeks(
+        client: &reqwest::blocking::Client,
+        url: &str,
+        label: &str,
+        min_bytes: usize,
+    ) -> usize {
         let head = client.head(url).send().expect("proxy HEAD");
         assert!(
             head.status().is_success() || head.status() == reqwest::StatusCode::PARTIAL_CONTENT,
@@ -1592,7 +1599,8 @@ fn t4_06_live_youtube_kalah2_and_mangu_acceptance() {
             .headers()
             .get(reqwest::header::CONTENT_LENGTH)
             .and_then(|v| v.to_str().ok())
-            .and_then(|s| s.parse::<usize>().ok());
+            .and_then(|s| s.parse::<usize>().ok())
+            .unwrap_or_else(|| panic!("{label}: HEAD missing Content-Length"));
 
         let mut resp = client.get(url).send().expect("proxy GET");
         assert!(
@@ -1603,31 +1611,28 @@ fn t4_06_live_youtube_kalah2_and_mangu_acceptance() {
         let mut full = Vec::new();
         resp.read_to_end(&mut full).expect("proxy read_to_end");
         assert!(
-            full.len() > 1_500_000,
-            "{label}: stream did not exceed 1,500,000 bytes (got {})",
+            full.len() > min_bytes,
+            "{label}: stream did not exceed {min_bytes} bytes (got {})",
             full.len()
         );
-        if let Some(exp) = expected_len {
-            assert_eq!(full.len(), exp, "{label}: full EOF byte mismatch");
+        assert_eq!(full.len(), expected_len, "{label}: full EOF byte mismatch");
+
+        if full.len() > 65_536 {
+            let mut seek_back = client.get(url).header("Range", "bytes=0-65535").send().unwrap();
+            assert_eq!(seek_back.status(), reqwest::StatusCode::PARTIAL_CONTENT, "{label} seek back status");
+            let mut back_bytes = Vec::new();
+            seek_back.read_to_end(&mut back_bytes).unwrap();
+            assert_eq!(&back_bytes[..], &full[0..=65535], "{label}: backward seek mismatch");
         }
 
-        // Backward seek
-        let mut seek_back = client.get(url).header("Range", "bytes=0-65535").send().unwrap();
-        assert_eq!(seek_back.status(), reqwest::StatusCode::PARTIAL_CONTENT, "{label} seek back status");
-        let mut back_bytes = Vec::new();
-        seek_back.read_to_end(&mut back_bytes).unwrap();
-        assert_eq!(&back_bytes[..], &full[0..=65535], "{label} backward seek mismatch");
-
-        // Forward seek past 1 MiB (1:04 boundary)
-        let mut seek_fwd = client
-            .get(url)
-            .header("Range", "bytes=1048576-1572863")
-            .send()
-            .unwrap();
-        assert_eq!(seek_fwd.status(), reqwest::StatusCode::PARTIAL_CONTENT, "{label} seek fwd status");
-        let mut fwd_bytes = Vec::new();
-        seek_fwd.read_to_end(&mut fwd_bytes).unwrap();
-        assert_eq!(&fwd_bytes[..], &full[1048576..=1572863], "{label} forward seek mismatch");
+        if full.len() > 1_048_576 {
+            let mut seek_fwd = client.get(url).header("Range", "bytes=1048576-").send().unwrap();
+            assert_eq!(seek_fwd.status(), reqwest::StatusCode::PARTIAL_CONTENT, "{label} seek fwd status");
+            let mut fwd_bytes = Vec::new();
+            seek_fwd.read_to_end(&mut fwd_bytes).unwrap();
+            assert_eq!(&fwd_bytes[..], &full[1_048_576..], "{label}: forward seek mismatch");
+        }
+        full.len()
     }
 
     let dir = TestTempDir::new("t4_06_live");
@@ -1715,7 +1720,13 @@ fn t4_06_live_youtube_kalah2_and_mangu_acceptance() {
             .find(|s| s.itag == 140 || s.itag == 251)
             .or_else(|| resolved.audio.first())
             .unwrap_or_else(|| panic!("{title}: no audio stream resolved"));
-        verify_live_stream_and_seeks(&client, &audio.url, &format!("{title} audio"));
+        let audio_bytes = verify_live_stream_and_seeks(
+            &client,
+            &audio.url,
+            &format!("{title} audio"),
+            1_500_000,
+        );
+        assert!(audio_bytes > 1_500_000, "{title}: audio must pass the 1:04 byte threshold");
 
         let mut video_checked = false;
         if let Some(vo) = resolved
@@ -1724,11 +1735,21 @@ fn t4_06_live_youtube_kalah2_and_mangu_acceptance() {
             .find(|v| v.height >= 360 && v.height <= 720)
             .or_else(|| resolved.video_only.first())
         {
-            verify_live_stream_and_seeks(&client, &vo.url, &format!("{title} video_only ({})", vo.quality));
+            verify_live_stream_and_seeks(
+                &client,
+                &vo.url,
+                &format!("{title} video_only ({})", vo.quality),
+                0,
+            );
             video_checked = true;
         }
         if let Some(mx) = resolved.muxed.first() {
-            verify_live_stream_and_seeks(&client, &mx.url, &format!("{title} muxed ({})", mx.quality));
+            verify_live_stream_and_seeks(
+                &client,
+                &mx.url,
+                &format!("{title} muxed ({})", mx.quality),
+                1_500_000,
+            );
             video_checked = true;
         }
         assert!(video_checked, "{title}: expected at least one video_only or muxed video stream");

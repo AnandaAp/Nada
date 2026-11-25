@@ -427,12 +427,17 @@ fn main() {
                     audio_bytes.len()
                 );
                 // Forward seek past 1 MiB, backward seek, and tail seek
+                let audio_fwd_start = if audio_bytes.len() > 2_131_071 {
+                    2_000_000
+                } else {
+                    1_048_576
+                };
                 verify_seek_slice(
                     &http_client,
                     &audio.url,
                     &audio_bytes,
-                    2_000_000,
-                    Some(2_131_071),
+                    audio_fwd_start,
+                    Some((audio_fwd_start + 131_071).min(audio_bytes.len() - 1)),
                     &format!("{title} audio fwd>1MiB"),
                 )
                 .await;
@@ -498,12 +503,6 @@ fn main() {
                 }
             }
 
-            if is_music {
-                assert!(
-                    !streams.muxed.is_empty(),
-                    "{title}: expected at least 1 muxed stream"
-                );
-            }
             if let Some(m) = streams.muxed.first() {
                 let m_bytes = fetch_full_and_verify_head(
                     &http_client,

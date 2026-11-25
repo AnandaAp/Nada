@@ -47,5 +47,10 @@ certificates/
 *.key
 github-secret-base64.txt
 
+# Environment Files
+.env
+.env.*
+!.env.example
+
 # AI & Codebase Memory Workspace Cache
 .codebase-memory/

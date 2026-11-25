@@ -680,12 +680,12 @@ main {
   right: 10px;
   width: 32px;
   height: 32px;
-  border-radius: var(--radius-sm);
+  border-radius: var(--radius-item);
   background: rgba(18, 20, 26, 0.8);
   backdrop-filter: blur(8px);
   -webkit-backdrop-filter: blur(8px);
   border: 1px solid var(--border-subtle);
-  color: var(--text-dim);
+  color: var(--text-dimmed);
   display: flex;
   align-items: center;
   justify-content: center;
@@ -703,13 +703,13 @@ main {
 
 .stage-pip-btn:hover {
   background: rgba(30, 34, 45, 0.95);
-  color: var(--brass-glow);
-  border-color: var(--border-brass);
+  color: var(--accent-brass-hover);
+  border-color: var(--accent-brass);
 }
 
 .stage-pip-btn.active {
-  color: var(--brass-primary);
-  border-color: var(--border-brass);
+  color: var(--accent-gold);
+  border-color: var(--accent-brass);
 }
 
 /* ==========================================================================

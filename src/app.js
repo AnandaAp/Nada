@@ -19,12 +19,16 @@ function setStorage(key, val) {
   } catch (_) {}
 }
 
+const STALL_TIMEOUT_MS = 7000;
+const MAX_STREAM_REFRESHES = 2;
+const SUSTAINED_PLAYBACK_MS = 10000;
+
 const state = {
   kind: "tracks",
   results: [],
   queue: [],
   index: -1,
-  mode: null, // 'audio' | 'muxed' | 'split'
+  mode: null, // 'audio' | 'muxed' | 'split' | 'yt'
   wantVideo: false,
   streams: null,
   loading: false,
@@ -32,6 +36,21 @@ const state = {
   starting: false,
   wantPlaying: false,
   seeking: false,
+  buffering: false,
+  splitBufferingPaused: false,
+  splitBufferingSeq: 0,
+  recovering: false,
+  recoveryTimer: null,
+  audioCandidateIdx: 0,
+  videoCandidateIdx: 0,
+  muxedCandidateIdx: 0,
+  streamRefreshCount: 0,
+  pendingResumePos: 0,
+  lastProgressPos: 0,
+  lastRecoveryAt: 0,
+  seekSeq: 0,
+  radioSeq: 0,
+  radioPendingId: 0,
   view: "home",
   viewId: 0,
   homeData: {},
@@ -52,6 +71,7 @@ function shuffleArray(arr) {
 }
 
 function setQueue(items, startIndex = 0) {
+  state.radioPendingId = 0;
   if (state.shuffle) {
     state.originalQueue = [...items];
     const picked = items[startIndex];
@@ -206,7 +226,7 @@ function renderHome() {
             const tracks = data.items.filter((t) => t.kind === "track");
             const trackIndex = tracks.findIndex((t) => t.id === item.id);
             setQueue(tracks, trackIndex !== -1 ? trackIndex : index);
-            state.wantVideo = item.video;
+            state.wantVideo = !!item.video;
             playCurrent();
           } else openCollection(item);
         });
@@ -308,6 +328,11 @@ function setStatus(text, loading = false) {
   el.classList.remove("hidden");
 }
 
+function setPlaybackStatus(text, loading = false) {
+  if (state.loading) return;
+  setStatus(text, loading);
+}
+
 function coverUrl(t) {
   return t.cover || "";
 }
@@ -356,7 +381,7 @@ function renderResults() {
     li.append(img, meta, dur);
     li.addEventListener("click", () => {
       setQueue(state.results, i);
-      state.wantVideo = t.video || state.wantVideo;
+      state.wantVideo = !!t.video;
       playCurrent();
     });
     ul.appendChild(li);
@@ -386,7 +411,7 @@ function renderQueue() {
     li.append(img, meta);
     li.addEventListener("click", () => {
       state.index = i;
-      state.wantVideo = t.video || state.wantVideo;
+      state.wantVideo = !!t.video || state.wantVideo;
       playCurrent();
     });
     ul.appendChild(li);
@@ -478,10 +503,11 @@ window.onYouTubeIframeAPIReady = function () {
           }
         },
         onStateChange: (event) => {
+          if (state.mode !== "yt") return;
           if (event.data === YT.PlayerState.PLAYING) {
             state.wantPlaying = true;
             state.starting = false;
-            setStatus(null);
+            setPlaybackStatus(null);
             setPlayingUI(true);
           } else if (event.data === YT.PlayerState.PAUSED) {
             state.wantPlaying = false;
@@ -491,12 +517,13 @@ window.onYouTubeIframeAPIReady = function () {
             setPlayingUI(false);
             next(true);
           } else if (event.data === YT.PlayerState.BUFFERING) {
-            setStatus("Buffering…", true);
+            setPlaybackStatus("Buffering…", true);
           }
         },
         onError: (event) => {
+          if (state.mode !== "yt") return;
           console.error("YouTube Player error:", event.data);
-          setStatus(null);
+          setPlaybackStatus(null);
           setPlayingUI(false);
           toast("Lagu tidak dapat diputar. Memutar lagu berikutnya…");
           next(true);
@@ -512,20 +539,140 @@ function activeEl() {
   return state.mode === "muxed" ? video : audio;
 }
 
+const mediaOps = new WeakMap();
+
+function getMediaOps(el) {
+  let ops = mediaOps.get(el);
+  if (!ops) {
+    ops = { play: 0, pause: 0, loadSeq: 0 };
+    mediaOps.set(el, ops);
+  }
+  return ops;
+}
+
+function resetMediaOps(el) {
+  const ops = getMediaOps(el);
+  ops.play = 0;
+  ops.pause = 0;
+  ops.loadSeq++;
+}
+
+function setMediaSrc(el, url) {
+  resetMediaOps(el);
+  el.src = url;
+}
+
+function clearMediaSrc(el) {
+  clearPendingSeek(el);
+  resetMediaOps(el);
+  el.removeAttribute("src");
+  el.load();
+}
+
+function programmaticPause(el) {
+  const ops = getMediaOps(el);
+  const wasPaused = el.paused;
+  ops.pause++;
+  el.pause();
+  if (wasPaused && ops.pause > 0) ops.pause--;
+}
+
+function programmaticPlay(el) {
+  const ops = getMediaOps(el);
+  const loadSeq = ops.loadSeq;
+  const wasPaused = el.paused;
+  ops.play++;
+  let p;
+  try {
+    p = el.play();
+  } catch (err) {
+    if (ops.loadSeq === loadSeq && ops.play > 0 && el.paused) ops.play--;
+    return Promise.reject(err);
+  }
+  if (!wasPaused && ops.play > 0) ops.play--;
+  if (p && typeof p.catch === "function") {
+    return p.catch((err) => {
+      if (ops.loadSeq === loadSeq && wasPaused && el.paused && ops.play > 0 && err?.name !== "AbortError") {
+        ops.play--;
+      }
+      throw err;
+    });
+  }
+  return Promise.resolve(p);
+}
+
+const pendingSeekHandlers = new WeakMap();
+
+function clearPendingSeek(el) {
+  const prev = pendingSeekHandlers.get(el);
+  if (!prev) return;
+  pendingSeekHandlers.delete(el);
+  if (typeof el.removeEventListener === "function") {
+    el.removeEventListener("loadedmetadata", prev);
+  }
+}
+
+function applyInitialPosition(el, position, playbackId, expectedSrc = el.src) {
+  clearPendingSeek(el);
+  const target = Number.isFinite(position) && position > 0 ? position : 0;
+  if (target === 0) {
+    if (el.readyState >= 1) {
+      try { el.currentTime = 0; } catch (_) {}
+    }
+    return;
+  }
+  if (el.readyState >= 1) {
+    const dur = el.duration;
+    try {
+      el.currentTime = Number.isFinite(dur) && dur > 0 ? Math.min(target, dur) : target;
+    } catch (_) {}
+    return;
+  }
+  let applied = false;
+  const onMeta = () => {
+    if (applied) return;
+    if (pendingSeekHandlers.get(el) === onMeta) {
+      pendingSeekHandlers.delete(el);
+    }
+    if (typeof el.removeEventListener === "function") {
+      el.removeEventListener("loadedmetadata", onMeta);
+    }
+    if (playbackId !== state.playbackId || !state.mode) return;
+    if (expectedSrc && el.src !== expectedSrc) return;
+    applied = true;
+    const dur = el.duration;
+    try {
+      el.currentTime = Number.isFinite(dur) && dur > 0 ? Math.min(target, dur) : target;
+    } catch (_) {}
+    onTimeUpdate();
+  };
+  pendingSeekHandlers.set(el, onMeta);
+  el.addEventListener("loadedmetadata", onMeta, { once: true });
+}
+
+function clearRecoveryTimer() {
+  if (state.recoveryTimer !== null) {
+    clearTimeout(state.recoveryTimer);
+    state.recoveryTimer = null;
+  }
+}
+
 function stopAll() {
-  audio.pause();
-  video.pause();
-  audio.removeAttribute("src");
-  video.removeAttribute("src");
-  audio.load();
-  video.load();
+  clearRecoveryTimer();
+  state.buffering = false;
+  state.splitBufferingPaused = false;
+  state.splitBufferingSeq++;
+  programmaticPause(audio);
+  programmaticPause(video);
+  clearMediaSrc(audio);
+  clearMediaSrc(video);
   if (ytPlayer && ytReady && ytPlayer.stopVideo) {
     try { ytPlayer.stopVideo(); } catch (_) {}
   }
 }
 
 function getAudioCandidates(list) {
-  const supported = list.filter((s) => audio.canPlayType(s.mime));
+  const supported = (list || []).filter((s) => audio.canPlayType(s.mime));
   const mp4 = supported.filter((s) => s.mime.includes("mp4"));
   const webm = supported.filter((s) => s.mime.includes("webm"));
   const others = supported.filter((s) => !s.mime.includes("webm") && !s.mime.includes("mp4"));
@@ -537,21 +684,42 @@ function pickAudio(list) {
   return candidates[0];
 }
 
-function pickVideo(list, maxH) {
-  const supported = list.filter((s) => video.canPlayType(s.mime));
+function getVideoCandidates(list, maxH = 720) {
+  const supported = (list || []).filter((s) => video.canPlayType(s.mime));
   const mp4 = supported.filter((s) => s.mime.includes("avc1"));
   const pool = mp4.length ? mp4 : supported;
   const capped = pool.filter((s) => s.height <= maxH);
-  return (capped.length ? capped : pool)[0];
+  const primary = capped.length ? capped : pool;
+  const seen = new Set(primary);
+  const rest = supported.filter((s) => !seen.has(s));
+  return [...primary, ...rest];
+}
+
+function pickVideo(list, maxH = 720) {
+  return getVideoCandidates(list, maxH)[0];
 }
 
 async function playCurrent(position = 0, wantPlaying = true) {
   const t = state.queue[state.index];
   if (!t) return;
   const playbackId = ++state.playbackId;
+  clearRecoveryTimer();
   state.mode = null;
   state.starting = true;
   state.wantPlaying = wantPlaying;
+  state.seeking = false;
+  state.buffering = false;
+  state.splitBufferingPaused = false;
+  state.splitBufferingSeq++;
+  state.recovering = false;
+  state.audioCandidateIdx = 0;
+  state.videoCandidateIdx = 0;
+  state.muxedCandidateIdx = 0;
+  state.streamRefreshCount = 0;
+  state.pendingResumePos = Number.isFinite(position) && position > 0 ? position : 0;
+  state.lastProgressPos = state.pendingResumePos;
+  state.lastRecoveryAt = 0;
+  state.radioPendingId = 0;
   stopAll();
   state.streams = null;
 
@@ -570,6 +738,9 @@ async function playCurrent(position = 0, wantPlaying = true) {
   updateMediaSession(t);
 
   const useVideo = state.wantVideo;
+  if (!useVideo && typeof document !== "undefined" && document.pictureInPictureElement) {
+    document.exitPictureInPicture().catch(() => {});
+  }
   $("videoStage").classList.toggle("hidden", !useVideo);
   $("videoBtn").classList.remove("hidden");
   $("videoBtn").classList.toggle("on", useVideo);
@@ -579,7 +750,7 @@ async function playCurrent(position = 0, wantPlaying = true) {
 }
 
 async function playCurrentNative(t, position, wantPlaying, playbackId) {
-  setStatus("Ngambil stream…", true);
+  setPlaybackStatus("Ngambil stream…", true);
 
   try {
     const s = await invoke("streams", { videoId: t.id });
@@ -594,58 +765,116 @@ async function playCurrentNative(t, position, wantPlaying, playbackId) {
       video.classList.remove("hidden");
       if ($("ytPlayer")) $("ytPlayer").classList.add("hidden");
 
-      const muxed = pickVideo(s.muxed, 720);
-      if (muxed) {
+      const muxedCandidates = getVideoCandidates(s.muxed, 720);
+      const videoCandidates = getVideoCandidates(s.video_only, 720);
+      const audioCandidates = getAudioCandidates(s.audio);
+
+      let started = false;
+      if (muxedCandidates.length) {
         state.mode = "muxed";
-        video.src = muxed.url;
-        video.muted = false;
-        video.currentTime = position;
-        setStatus(null);
-        setPlayingUI(state.wantPlaying);
-        if (state.wantPlaying) {
+        for (let i = 0; i < muxedCandidates.length; i++) {
+          if (playbackId !== state.playbackId) return;
+          const muxed = muxedCandidates[i];
+          state.muxedCandidateIdx = i;
           try {
-            await video.play();
+            setMediaSrc(video, muxed.url);
+            video.muted = false;
+            applyInitialPosition(video, position, playbackId, muxed.url);
+            setPlaybackStatus(null);
+            setPlayingUI(state.wantPlaying);
+            if (state.wantPlaying) {
+              await programmaticPlay(video);
+            }
+            started = true;
+            break;
           } catch (e) {
-            if (playbackId === state.playbackId && e.name !== "AbortError") failPlayback(`Gagal muter: ${e}`);
+            if (playbackId !== state.playbackId || e.name === "AbortError") return;
+            console.warn(`Muxed candidate ${muxed.mime} failed, trying next...`, e);
           }
         }
-      } else {
-        const v = pickVideo(s.video_only, 720);
-        const a = pickAudio(s.audio);
-        if (!v || !a) throw new Error("nggak ada stream yang bisa diputer");
-        state.mode = "split";
-        video.src = v.url;
-        video.muted = true;
-        audio.src = a.url;
-        video.currentTime = position;
-        audio.currentTime = position;
-        setStatus(null);
-        setPlayingUI(state.wantPlaying);
-        if (state.wantPlaying) {
-          try {
-            await Promise.all([video.play(), audio.play()]);
-          } catch (e) {
-            if (playbackId === state.playbackId && e.name !== "AbortError") failPlayback(`Gagal muter: ${e}`);
+        if (!started && (!videoCandidates.length || !audioCandidates.length)) {
+          if (state.wantPlaying) {
+            failPlayback("Gagal muter stream video.");
+            return;
           }
+        }
+      }
+
+      if (!started) {
+        if (!videoCandidates.length || !audioCandidates.length) {
+          throw new Error("nggak ada stream yang bisa diputer");
+        }
+        state.mode = "split";
+        let vIdx = 0;
+        let aIdx = 0;
+        let lastErr = null;
+        while (vIdx < videoCandidates.length && aIdx < audioCandidates.length) {
+          if (playbackId !== state.playbackId) return;
+          const v = videoCandidates[vIdx];
+          const a = audioCandidates[aIdx];
+          state.videoCandidateIdx = vIdx;
+          state.audioCandidateIdx = aIdx;
+          try {
+            if (video.src !== v.url) {
+              setMediaSrc(video, v.url);
+              video.muted = true;
+            }
+            if (audio.src !== a.url) {
+              setMediaSrc(audio, a.url);
+            }
+            applyInitialPosition(video, position, playbackId, v.url);
+            applyInitialPosition(audio, position, playbackId, a.url);
+            setPlaybackStatus(null);
+            setPlayingUI(state.wantPlaying);
+            if (state.wantPlaying) {
+              await Promise.all([programmaticPlay(video), programmaticPlay(audio)]);
+            }
+            started = true;
+            break;
+          } catch (e) {
+            if (playbackId !== state.playbackId || e.name === "AbortError") return;
+            lastErr = e;
+            programmaticPause(audio);
+            programmaticPause(video);
+            if (video.error && vIdx + 1 < videoCandidates.length) {
+              vIdx++;
+            } else if (aIdx + 1 < audioCandidates.length) {
+              aIdx++;
+            } else if (vIdx + 1 < videoCandidates.length) {
+              vIdx++;
+              aIdx = 0;
+            } else {
+              break;
+            }
+          }
+        }
+        if (!started && state.wantPlaying) {
+          failPlayback(`Gagal muter: ${lastErr}`);
+          return;
         }
       }
     } else {
       const candidates = getAudioCandidates(s.audio);
       if (!candidates.length) throw new Error("nggak ada stream audio");
       state.mode = "audio";
+      if (typeof document !== "undefined" && document.pictureInPictureElement) {
+        document.exitPictureInPicture().catch(() => {});
+      }
       $("videoStage").classList.add("hidden");
       video.classList.add("hidden");
 
       let played = false;
-      for (const a of candidates) {
+      for (let i = 0; i < candidates.length; i++) {
         if (playbackId !== state.playbackId) return;
+        const a = candidates[i];
+        state.audioCandidateIdx = i;
         try {
-          audio.src = a.url;
-          audio.currentTime = position;
-          setStatus(null);
+          setMediaSrc(audio, a.url);
+          applyInitialPosition(audio, position, playbackId, a.url);
+          setPlaybackStatus(null);
           setPlayingUI(state.wantPlaying);
           if (state.wantPlaying) {
-            await audio.play();
+            await programmaticPlay(audio);
           }
           played = true;
           break;
@@ -660,19 +889,22 @@ async function playCurrentNative(t, position, wantPlaying, playbackId) {
       }
     }
     if (playbackId !== state.playbackId) return;
-    setStatus(null);
+    setPlaybackStatus(null);
     setPlayingUI(state.wantPlaying);
   } catch (e) {
     if (playbackId !== state.playbackId || e.name === "AbortError") return;
     console.warn("Native stream extraction failed, attempting fallback:", e);
     if (typeof YT !== "undefined" && YT.Player && ytPlayer && ytReady && ytPlayer.loadVideoById) {
       state.mode = "yt";
+      if (typeof document !== "undefined" && document.pictureInPictureElement) {
+        document.exitPictureInPicture().catch(() => {});
+      }
       if (state.wantVideo) {
         $("videoStage").classList.remove("hidden");
         video.classList.add("hidden");
         if ($("ytPlayer")) $("ytPlayer").classList.remove("hidden");
       }
-      setStatus("Memuat lagu cadangan…", true);
+      setPlaybackStatus("Memuat lagu cadangan…", true);
       ytPlayer.loadVideoById({
         videoId: t.id,
         startSeconds: position,
@@ -688,11 +920,285 @@ async function playCurrentNative(t, position, wantPlaying, playbackId) {
   }
 }
 
+function scheduleStallRecovery(el) {
+  if (!state.mode || state.mode === "yt" || state.starting || !state.wantPlaying || state.recovering || state.seeking) return;
+  if (state.mode !== "split" && el !== activeEl()) return;
+  if (el.ended || activeEl().ended) return;
+  if (state.recoveryTimer !== null) return;
+
+  const playbackId = state.playbackId;
+  const scheduledPos = activeEl().currentTime;
+  state.recoveryTimer = setTimeout(() => {
+    state.recoveryTimer = null;
+    if (playbackId !== state.playbackId) return;
+    if (!state.mode || state.mode === "yt" || state.starting || !state.wantPlaying || state.recovering || state.seeking) return;
+    if (el.ended || activeEl().ended) return;
+
+    const curPos = activeEl().currentTime;
+    const progressed = Math.abs(curPos - scheduledPos) > 0.25;
+    const ready = state.mode === "split"
+      ? (!audio.paused && !video.paused && audio.readyState >= 3 && video.readyState >= 3)
+      : (!activeEl().paused && activeEl().readyState >= 3);
+
+    if (progressed && ready) {
+      state.buffering = false;
+      state.splitBufferingPaused = false;
+      state.splitBufferingSeq++;
+      setPlaybackStatus(null);
+      return;
+    }
+    recoverPlayback("stall", el);
+  }, STALL_TIMEOUT_MS);
+}
+
+async function recoverPlayback(reason, failedEl = null) {
+  if (!state.mode || state.mode === "yt" || state.recovering) return;
+  const t = state.queue[state.index];
+  if (!t) return;
+  const playbackId = state.playbackId;
+
+  const cur = activeEl().currentTime;
+  const resumePos = (Number.isFinite(cur) && cur > 0)
+    ? cur
+    : (state.pendingResumePos || state.lastProgressPos || 0);
+  const seekSeqAtStart = state.seekSeq;
+  state.pendingResumePos = resumePos;
+  const getResumePos = () => (state.seekSeq !== seekSeqAtStart
+    ? state.pendingResumePos
+    : (state.pendingResumePos || resumePos));
+
+  clearRecoveryTimer();
+  state.recovering = true;
+  state.buffering = true;
+  state.splitBufferingPaused = false;
+  state.splitBufferingSeq++;
+  setPlaybackStatus("Menyambungkan ulang…", true);
+  programmaticPause(audio);
+  programmaticPause(video);
+
+  const tryCurrentPool = async (failed) => {
+    if (playbackId !== state.playbackId) return false;
+    if (state.mode === "audio") {
+      const candidates = getAudioCandidates(state.streams?.audio || []);
+      for (let i = state.audioCandidateIdx + 1; i < candidates.length; i++) {
+        if (playbackId !== state.playbackId) return false;
+        const a = candidates[i];
+        state.audioCandidateIdx = i;
+        try {
+          setMediaSrc(audio, a.url);
+          applyInitialPosition(audio, getResumePos(), playbackId, a.url);
+          if (state.wantPlaying) await programmaticPlay(audio);
+          if (playbackId !== state.playbackId) return false;
+          if (!audio.error) return true;
+        } catch (e) {
+          if (playbackId !== state.playbackId || e.name === "AbortError") throw e;
+          console.warn(`Recovery audio candidate ${i} failed (${reason}):`, e);
+        }
+      }
+      return false;
+    }
+
+    if (state.mode === "muxed") {
+      const candidates = getVideoCandidates(state.streams?.muxed || [], 720);
+      for (let i = state.muxedCandidateIdx + 1; i < candidates.length; i++) {
+        if (playbackId !== state.playbackId) return false;
+        const m = candidates[i];
+        state.muxedCandidateIdx = i;
+        try {
+          setMediaSrc(video, m.url);
+          video.muted = false;
+          applyInitialPosition(video, getResumePos(), playbackId, m.url);
+          if (state.wantPlaying) await programmaticPlay(video);
+          if (playbackId !== state.playbackId) return false;
+          if (!video.error) return true;
+        } catch (e) {
+          if (playbackId !== state.playbackId || e.name === "AbortError") throw e;
+          console.warn(`Recovery muxed candidate ${i} failed (${reason}):`, e);
+        }
+      }
+      return false;
+    }
+
+    if (state.mode === "split") {
+      const aCandidates = getAudioCandidates(state.streams?.audio || []);
+      const vCandidates = getVideoCandidates(state.streams?.video_only || [], 720);
+      if (!aCandidates.length || !vCandidates.length) return false;
+
+      const freshPool = state.audioCandidateIdx < 0 || state.videoCandidateIdx < 0;
+      let audioFailed = freshPool || failed === audio || Boolean(audio.error);
+      let videoFailed = freshPool || failed === video || Boolean(video.error);
+      if (!audioFailed && !videoFailed) {
+        audioFailed = audio.readyState < 3;
+        videoFailed = video.readyState < 3;
+      }
+      if (!audioFailed && !videoFailed) {
+        audioFailed = true;
+        videoFailed = true;
+      }
+
+      const trySplitPair = async (vi, ai) => {
+        if (playbackId !== state.playbackId) return false;
+        const v = vCandidates[vi];
+        const a = aCandidates[ai];
+        state.videoCandidateIdx = vi;
+        state.audioCandidateIdx = ai;
+        const targetPos = getResumePos();
+        try {
+          if (video.src !== v.url) {
+            setMediaSrc(video, v.url);
+            video.muted = true;
+          }
+          if (audio.src !== a.url) {
+            setMediaSrc(audio, a.url);
+          }
+          applyInitialPosition(video, targetPos, playbackId, v.url);
+          applyInitialPosition(audio, targetPos, playbackId, a.url);
+          if (state.wantPlaying) await Promise.all([programmaticPlay(video), programmaticPlay(audio)]);
+          if (playbackId !== state.playbackId) return false;
+          if (!audio.error && !video.error) return true;
+          programmaticPause(audio);
+          programmaticPause(video);
+        } catch (e) {
+          if (playbackId !== state.playbackId || e.name === "AbortError") throw e;
+          programmaticPause(audio);
+          programmaticPause(video);
+        }
+        return false;
+      };
+
+      if (audioFailed && videoFailed) {
+        const startVi = Math.max(0, state.videoCandidateIdx);
+        const startAi = state.audioCandidateIdx;
+        const skipAttempted = !freshPool && state.videoCandidateIdx >= 0 && state.audioCandidateIdx >= 0;
+        for (let vi = startVi; vi < vCandidates.length; vi++) {
+          for (let ai = 0; ai < aCandidates.length; ai++) {
+            if (skipAttempted && vi === startVi && ai <= startAi) continue;
+            if (await trySplitPair(vi, ai)) return true;
+          }
+        }
+        return false;
+      }
+
+      if (audioFailed) {
+        const vi = Math.max(0, state.videoCandidateIdx);
+        for (let ai = state.audioCandidateIdx + 1; ai < aCandidates.length; ai++) {
+          if (await trySplitPair(vi, ai)) return true;
+        }
+        return false;
+      }
+
+      if (videoFailed) {
+        const ai = Math.max(0, state.audioCandidateIdx);
+        for (let vi = state.videoCandidateIdx + 1; vi < vCandidates.length; vi++) {
+          if (await trySplitPair(vi, ai)) return true;
+        }
+      }
+      return false;
+    }
+
+    return false;
+  };
+
+  try {
+    let recovered = await tryCurrentPool(failedEl);
+
+    while (!recovered && state.streamRefreshCount < MAX_STREAM_REFRESHES) {
+      if (playbackId !== state.playbackId) return;
+      state.streamRefreshCount++;
+      state.lastRecoveryAt = Date.now();
+
+      let s;
+      try {
+        s = await invoke("streams", { videoId: t.id });
+      } catch (e) {
+        if (playbackId !== state.playbackId) return;
+        console.warn(`Recovery stream refresh ${state.streamRefreshCount} failed:`, e);
+        continue;
+      }
+      if (playbackId !== state.playbackId) return;
+      if (!s) continue;
+
+      state.streams = s;
+      state.audioCandidateIdx = -1;
+      state.videoCandidateIdx = -1;
+      state.muxedCandidateIdx = -1;
+
+      const mCandidates = getVideoCandidates(s.muxed, 720);
+      const vCandidates = getVideoCandidates(s.video_only, 720);
+      const aCandidates = getAudioCandidates(s.audio);
+      const hasVideo = (s.muxed?.length > 0) || (s.video_only?.length > 0);
+
+      if (state.wantVideo && hasVideo) {
+        $("videoStage").classList.remove("hidden");
+        video.classList.remove("hidden");
+        if ($("ytPlayer")) $("ytPlayer").classList.add("hidden");
+
+        if (mCandidates.length > 0) {
+          state.mode = "muxed";
+          if (await tryCurrentPool(null)) {
+            recovered = true;
+            break;
+          }
+        }
+        if (vCandidates.length > 0 && aCandidates.length > 0) {
+          state.mode = "split";
+          state.videoCandidateIdx = -1;
+          state.audioCandidateIdx = -1;
+          if (await tryCurrentPool(null)) {
+            recovered = true;
+            break;
+          }
+        }
+      }
+      if (!recovered && aCandidates.length > 0) {
+        state.mode = "audio";
+        state.audioCandidateIdx = -1;
+        clearMediaSrc(video);
+        if (typeof document !== "undefined" && document.pictureInPictureElement) {
+          document.exitPictureInPicture().catch(() => {});
+        }
+        $("videoStage").classList.add("hidden");
+        video.classList.add("hidden");
+        if (await tryCurrentPool(null)) {
+          recovered = true;
+          break;
+        }
+      }
+    }
+
+    if (playbackId !== state.playbackId) return;
+    if (recovered) {
+      state.buffering = false;
+      state.splitBufferingPaused = false;
+      state.splitBufferingSeq++;
+      setPlaybackStatus(null);
+      setPlayingUI(state.wantPlaying);
+      if (!state.lastRecoveryAt) state.lastRecoveryAt = Date.now();
+    } else {
+      failPlayback("Stream terputus. Tekan play untuk coba lagi, atau pilih lagu lain.");
+    }
+  } catch (e) {
+    if (playbackId === state.playbackId && e && e.name === "AbortError") {
+      state.buffering = false;
+      state.splitBufferingPaused = false;
+      state.splitBufferingSeq++;
+      setPlaybackStatus(null);
+    }
+  } finally {
+    if (playbackId === state.playbackId) state.recovering = false;
+  }
+}
+
 function failPlayback(message) {
   state.wantPlaying = false;
   state.mode = null;
+  state.recovering = false;
+  state.buffering = false;
+  state.splitBufferingPaused = false;
+  state.splitBufferingSeq++;
+  state.pendingResumePos = 0;
   stopAll();
-  setStatus(null);
+  setPlaybackStatus(null);
   setPlayingUI(false);
   toast(message);
 }
@@ -719,7 +1225,7 @@ async function togglePlay() {
       state.starting = false;
       state.wantPlaying = false;
       stopAll();
-      setStatus(null);
+      setPlaybackStatus(null);
       setPlayingUI(false);
       return;
     }
@@ -727,14 +1233,23 @@ async function togglePlay() {
     return;
   }
   state.wantPlaying = !state.wantPlaying;
+  state.splitBufferingPaused = false;
+  state.splitBufferingSeq++;
+  if (!state.wantPlaying) {
+    clearRecoveryTimer();
+    state.buffering = false;
+    setPlaybackStatus(null);
+  }
   const els = state.mode === "split" ? [audio, video] : [activeEl()];
   const playbackId = state.playbackId;
   try {
-    if (!state.wantPlaying) els.forEach((el) => el.pause());
-    else await Promise.all(els.map((el) => el.play()));
+    if (!state.wantPlaying) els.forEach((el) => programmaticPause(el));
+    else await Promise.all(els.map((el) => programmaticPlay(el)));
     if (playbackId === state.playbackId) setPlayingUI(state.wantPlaying);
   } catch (e) {
-    if (playbackId === state.playbackId && e.name !== "AbortError") failPlayback(`Gagal muter: ${e}`);
+    if (playbackId === state.playbackId && e.name !== "AbortError") {
+      recoverPlayback("play-error", activeEl());
+    }
   }
 }
 
@@ -754,11 +1269,24 @@ async function next(auto = false) {
     playCurrent();
     return;
   }
+  if (state.radioPendingId) return;
   const last = state.queue[state.queue.length - 1];
   const playbackId = state.playbackId;
+  const queueLen = state.queue.length;
+  const indexSnapshot = state.index;
+  const radioId = ++state.radioSeq;
+  state.radioPendingId = radioId;
   try {
     const more = await invoke("radio", { videoId: last.id });
-    if (playbackId !== state.playbackId) return;
+    if (
+      radioId !== state.radioPendingId ||
+      playbackId !== state.playbackId ||
+      state.queue.length !== queueLen ||
+      state.index !== indexSnapshot ||
+      state.queue[state.index]?.id !== last.id
+    ) {
+      return;
+    }
     const known = new Set(state.queue.map((t) => t.id));
     const fresh = more.filter((t) => !known.has(t.id));
     if (!fresh.length) {
@@ -769,12 +1297,16 @@ async function next(auto = false) {
     if (state.originalQueue) state.originalQueue.push(...fresh);
     state.index++;
     if (auto) toast("Radio: lanjut otomatis ♪");
+    state.radioPendingId = 0;
     playCurrent();
   } catch (e) {
+    if (radioId !== state.radioPendingId || playbackId !== state.playbackId) return;
     if (auto) {
       setPlayingUI(false);
       toast(`Radio gagal: ${e}`);
     }
+  } finally {
+    if (state.radioPendingId === radioId) state.radioPendingId = 0;
   }
 }
 
@@ -822,30 +1354,93 @@ function seekTo(sec) {
     return;
   }
   if (!state.mode) return;
+  state.seekSeq++;
+  clearRecoveryTimer();
+  const wasBuffering = state.buffering;
+  const wasSplitBufferingPaused = state.splitBufferingPaused;
+  if (!state.recovering) {
+    state.buffering = false;
+    state.splitBufferingPaused = false;
+    state.splitBufferingSeq++;
+    if (wasBuffering) setPlaybackStatus(null);
+  }
   const duration = activeEl().duration;
-  const time = Math.max(0, Math.min(sec, Number.isFinite(duration) ? duration : sec));
-  activeEl().currentTime = time;
-  if (state.mode === "split") video.currentTime = time;
+  const time = Math.max(0, Math.min(sec, Number.isFinite(duration) && duration > 0 ? duration : sec));
+  state.pendingResumePos = time;
+  state.lastProgressPos = time;
+  applyInitialPosition(activeEl(), time, state.playbackId);
+  if (state.mode === "split") applyInitialPosition(video, time, state.playbackId);
+  if (!state.recovering && wasSplitBufferingPaused && state.wantPlaying && state.mode === "split") {
+    if (audio.readyState >= 3 && video.readyState >= 3) {
+      const playbackId = state.playbackId;
+      Promise.all([programmaticPlay(audio), programmaticPlay(video)]).catch((e) => {
+        if (playbackId === state.playbackId && e.name !== "AbortError") {
+          recoverPlayback("play-error", null);
+        }
+      });
+    } else {
+      state.buffering = true;
+      state.splitBufferingPaused = true;
+      state.splitBufferingSeq++;
+      setPlaybackStatus("Buffering…", true);
+      scheduleStallRecovery(audio.readyState < 3 ? audio : video);
+    }
+  }
 }
 
-function onTimeUpdate() {
+function onTimeUpdate(event) {
+  if (event?.target && event.target !== activeEl()) return;
   if (state.seeking) return;
   const el = activeEl();
   const dur = el.duration || 0;
   $("curTime").textContent = fmtTime(el.currentTime);
   $("durTime").textContent = fmtTime(dur);
   if (dur > 0) $("progress").value = Math.round((el.currentTime / dur) * 1000);
+
+  if (state.mode && state.mode !== "yt" && !el.paused && el.readyState >= 3) {
+    const bothReady = state.mode !== "split" || (audio.readyState >= 3 && video.readyState >= 3);
+    if (bothReady) {
+      if (state.buffering && !state.starting && !state.recovering) {
+        state.buffering = false;
+        setPlaybackStatus(null);
+      }
+      if (Math.abs(el.currentTime - state.lastProgressPos) > 0.25) {
+        clearRecoveryTimer();
+      }
+      if (state.streamRefreshCount > 0 && state.lastRecoveryAt && (Date.now() - state.lastRecoveryAt >= SUSTAINED_PLAYBACK_MS)) {
+        state.streamRefreshCount = 0;
+        state.lastRecoveryAt = 0;
+      }
+      state.lastProgressPos = el.currentTime;
+    }
+    if (state.pendingResumePos > 0 && el.currentTime >= state.pendingResumePos - 1) {
+      state.pendingResumePos = 0;
+    }
+  }
 }
 
 function onEnded(event) {
   if (!state.mode || event.target !== activeEl()) return;
+  clearRecoveryTimer();
+  state.buffering = false;
+  state.splitBufferingPaused = false;
+  state.splitBufferingSeq++;
+  state.pendingResumePos = 0;
   state.wantPlaying = false;
   next(true);
 }
 
-function onError() {
-  if (!state.mode || state.starting) return;
-  failPlayback("Stream terputus. Tekan play untuk coba lagi, atau pilih lagu lain.");
+function onError(event) {
+  const el = event?.target || activeEl();
+  if (!state.mode || state.mode === "yt") return;
+  if (state.starting && state.wantPlaying) return;
+  if (state.mode !== "split" && el !== activeEl()) return;
+  if (!el.src) return;
+  if (state.recovering) return;
+  if (state.starting && !state.wantPlaying) {
+    state.starting = false;
+  }
+  recoverPlayback("error", el);
 }
 
 function updateMediaSession(t) {
@@ -945,6 +1540,7 @@ $("progress").addEventListener("input", () => {
   if (dur > 0) $("curTime").textContent = fmtTime((dur * $("progress").value) / 1000);
 });
 $("progress").addEventListener("change", () => {
+  state.seeking = false;
   let dur = 0;
   if (state.mode === "yt" && ytPlayer && ytReady && ytPlayer.getDuration) {
     dur = ytPlayer.getDuration() || 0;
@@ -952,8 +1548,15 @@ $("progress").addEventListener("change", () => {
     dur = activeEl().duration || 0;
   }
   if (dur > 0) seekTo((dur * $("progress").value) / 1000);
-  state.seeking = false;
 });
+const clearSeeking = () => { state.seeking = false; };
+["pointerup", "mouseup", "pointercancel", "blur"].forEach((evt) => {
+  $("progress").addEventListener(evt, clearSeeking);
+});
+if (typeof window !== "undefined" && typeof window.addEventListener === "function") {
+  window.addEventListener("blur", clearSeeking);
+  window.addEventListener("pointerup", clearSeeking);
+}
 
 const savedVol = localStorage.getItem("nada.volume");
 $("volume").value = savedVol !== null ? savedVol : 80;
@@ -989,29 +1592,149 @@ setInterval(() => {
   el.addEventListener("timeupdate", onTimeUpdate);
   el.addEventListener("ended", onEnded);
   el.addEventListener("error", onError);
-  el.addEventListener("play", () => setPlayingUI(true));
+  el.addEventListener("seeked", () => { state.seeking = false; });
+  el.addEventListener("play", () => {
+    const ops = getMediaOps(el);
+    if (ops.play > 0) {
+      ops.play--;
+      return;
+    }
+    if (el.paused) return;
+    if (!state.mode || state.mode === "yt" || state.starting || state.splitBufferingPaused || state.recovering) return;
+    if (state.mode === "split") {
+      if (el === video && !state.wantPlaying && audio.paused) {
+        state.wantPlaying = true;
+        setPlayingUI(true);
+        const playbackId = state.playbackId;
+        programmaticPlay(audio).catch((e) => {
+          if (playbackId === state.playbackId && e.name !== "AbortError") {
+            recoverPlayback("play-error", audio);
+          }
+        });
+        return;
+      }
+      if (el === audio && !state.wantPlaying && video.paused) {
+        state.wantPlaying = true;
+        setPlayingUI(true);
+        const playbackId = state.playbackId;
+        programmaticPlay(video).catch((e) => {
+          if (playbackId === state.playbackId && e.name !== "AbortError") {
+            recoverPlayback("play-error", video);
+          }
+        });
+        return;
+      }
+      if (el === audio) setPlayingUI(true);
+      return;
+    }
+    if (el === activeEl()) {
+      state.wantPlaying = true;
+      setPlayingUI(true);
+    }
+  });
+  el.addEventListener("playing", () => {
+    if (!state.mode || state.mode === "yt") return;
+    if (state.mode !== "split" && el !== activeEl()) return;
+    if (state.mode === "split" && (audio.readyState < 3 || video.readyState < 3)) return;
+    if (el.readyState < 3) return;
+    clearRecoveryTimer();
+    state.buffering = false;
+    state.splitBufferingPaused = false;
+    state.splitBufferingSeq++;
+    if (!state.starting && !state.recovering) setPlaybackStatus(null);
+    setPlayingUI(true);
+  });
   el.addEventListener("pause", () => {
-    if (state.mode === "split" && el === video) return;
-    setPlayingUI(false);
+    const ops = getMediaOps(el);
+    if (ops.pause > 0) {
+      ops.pause--;
+      return;
+    }
+    if (!el.paused) return;
+    if (!state.mode || state.mode === "yt" || state.starting || state.splitBufferingPaused || state.recovering || el.ended) return;
+    if (state.mode === "split") {
+      if (el === video) {
+        if (state.wantPlaying && !audio.paused) {
+          state.wantPlaying = false;
+          clearRecoveryTimer();
+          state.buffering = false;
+          setPlayingUI(false);
+          programmaticPause(audio);
+        }
+        return;
+      }
+      if (el === audio) {
+        if (state.wantPlaying && !video.paused) {
+          state.wantPlaying = false;
+          clearRecoveryTimer();
+          state.buffering = false;
+          programmaticPause(video);
+        }
+        setPlayingUI(false);
+        return;
+      }
+      return;
+    }
+    if (el === activeEl()) {
+      state.wantPlaying = false;
+      clearRecoveryTimer();
+      state.buffering = false;
+      setPlayingUI(false);
+    }
   });
 });
 
 [audio, video].forEach((el) => {
   el.addEventListener("waiting", () => {
-    if (state.mode !== "split" || state.starting || !state.wantPlaying) return;
-    audio.pause();
-    video.pause();
-    setStatus("Buffering…", true);
+    if (!state.mode || state.mode === "yt" || state.starting || !state.wantPlaying || state.recovering || state.seeking) return;
+    if (state.mode !== "split" && el !== activeEl()) return;
+    if (el.ended || activeEl().ended) return;
+    state.buffering = true;
+    if (state.mode === "split") {
+      state.splitBufferingPaused = true;
+      state.splitBufferingSeq++;
+      programmaticPause(audio);
+      programmaticPause(video);
+    }
+    setPlaybackStatus("Buffering…", true);
+    scheduleStallRecovery(el);
+  });
+  el.addEventListener("stalled", () => {
+    if (!state.mode || state.mode === "yt" || state.starting || !state.wantPlaying || state.recovering || state.seeking) return;
+    if (state.mode !== "split" && el !== activeEl()) return;
+    if (el.ended || activeEl().ended) return;
+    if (el.readyState < 3) {
+      state.buffering = true;
+      setPlaybackStatus("Buffering…", true);
+    }
+    scheduleStallRecovery(el);
   });
   el.addEventListener("canplay", async () => {
-    if (state.mode !== "split" || state.starting || !state.wantPlaying) return;
+    if (!state.mode || state.mode === "yt" || state.starting || !state.wantPlaying || state.recovering) return;
+    if (state.mode !== "split") {
+      if (el !== activeEl() || el.readyState < 3) return;
+      clearRecoveryTimer();
+      state.buffering = false;
+      setPlaybackStatus(null);
+      return;
+    }
     if (audio.readyState < 3 || video.readyState < 3) return;
+    clearRecoveryTimer();
+    state.buffering = false;
     const playbackId = state.playbackId;
+    const bufSeq = state.splitBufferingSeq;
     try {
-      await Promise.all([audio.play(), video.play()]);
-      if (playbackId === state.playbackId) setStatus(null);
+      await Promise.all([programmaticPlay(audio), programmaticPlay(video)]);
+      if (playbackId !== state.playbackId || bufSeq !== state.splitBufferingSeq) return;
+      state.splitBufferingPaused = false;
+      state.splitBufferingSeq++;
+      setPlaybackStatus(null);
     } catch (e) {
-      if (playbackId === state.playbackId && e.name !== "AbortError") failPlayback(`Gagal muter: ${e}`);
+      if (playbackId === state.playbackId && bufSeq === state.splitBufferingSeq && e?.name !== "AbortError") {
+        state.splitBufferingPaused = false;
+        state.splitBufferingSeq++;
+        recoverPlayback("play-error", null);
+      }
     }
   });
 });

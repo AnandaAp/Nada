@@ -9,11 +9,16 @@ use rustypipe::model::{TrackItem, TrackType};
 use rustypipe::param::{Country, Language};
 use serde_json::Value;
 
-mod proxy;
+use std::sync::{Arc, Condvar, Mutex};
+
+pub mod bg_engine;
+pub mod proxy;
+pub mod streams;
 
 struct AppState {
     rp: RustyPipe,
     proxy: proxy::StreamProxy,
+    bg: Arc<bg_engine::BgEngine>,
 }
 
 #[derive(Serialize, Clone)]
@@ -302,20 +307,56 @@ async fn search(
 
 #[tauri::command]
 async fn streams(state: State<'_, AppState>, video_id: String) -> Result<StreamsResponse, String> {
-    let player = match state
+    if let Ok(resolved) = streams::resolve_streams(&state.bg, &state.proxy, &video_id).await {
+        let mut audio: Vec<AudioOption> = resolved
+            .audio
+            .into_iter()
+            .map(|s| AudioOption {
+                url: s.url,
+                mime: s.mime,
+                bitrate: s.bitrate,
+            })
+            .collect();
+        audio.sort_by(|a, b| b.bitrate.cmp(&a.bitrate));
+
+        let mut muxed: Vec<VideoOption> = resolved
+            .muxed
+            .into_iter()
+            .map(|s| VideoOption {
+                url: s.url,
+                mime: s.mime,
+                quality: s.quality,
+                height: s.height,
+            })
+            .collect();
+        muxed.sort_by(|a, b| b.height.cmp(&a.height));
+
+        let mut video_only: Vec<VideoOption> = resolved
+            .video_only
+            .into_iter()
+            .map(|s| VideoOption {
+                url: s.url,
+                mime: s.mime,
+                quality: s.quality,
+                height: s.height,
+            })
+            .collect();
+        video_only.sort_by(|a, b| b.height.cmp(&a.height));
+
+        return Ok(StreamsResponse {
+            muxed,
+            video_only,
+            audio,
+            expires_in_seconds: resolved.expires_in_seconds,
+        });
+    }
+
+    let player = state
         .rp
         .query()
         .player_from_client(&video_id, rustypipe::client::ClientType::Ios)
         .await
-    {
-        Ok(p) => p,
-        Err(_) => state
-            .rp
-            .query()
-            .player(&video_id)
-            .await
-            .map_err(|e| e.to_string())?,
-    };
+        .map_err(|e| e.to_string())?;
 
     let mut audio: Vec<AudioOption> = player
         .audio_streams
@@ -515,7 +556,39 @@ pub fn run() {
                 .storage_dir(storage_dir)
                 .build()
                 .expect("failed to build RustyPipe client");
-            app.manage(AppState { rp, proxy });
+
+            let bg_loaded = Arc::new((Mutex::new(false), Condvar::new()));
+            let bg_loaded_hook = bg_loaded.clone();
+            let bg_win = tauri::WebviewWindowBuilder::new(
+                app,
+                "bg_worker",
+                tauri::WebviewUrl::External("https://www.youtube.com/robots.txt".parse().unwrap()),
+            )
+            .title("Nada BgWorker")
+            .visible(false)
+            .skip_taskbar(true)
+            .inner_size(1.0, 1.0)
+            .on_page_load(move |_win, payload| {
+                if matches!(payload.event(), tauri::webview::PageLoadEvent::Finished)
+                    && payload.url().as_str().contains("robots.txt")
+                {
+                    let (lock, cvar) = &*bg_loaded_hook;
+                    *lock.lock().unwrap() = true;
+                    cvar.notify_all();
+                }
+            })
+            .build()?;
+            let host = Arc::new(
+                bg_engine::TauriJsHost::new(bg_win, bg_loaded)
+                    .expect("failed to start TauriJsHost"),
+            );
+            let bg = Arc::new(bg_engine::BgEngine::new(host).expect("failed to init BgEngine"));
+            let bg_warm = bg.clone();
+            tauri::async_runtime::spawn(async move {
+                let _ = bg_warm.ensure_initialized().await;
+            });
+
+            app.manage(AppState { rp, proxy, bg });
 
             if let Some(window) = app.get_webview_window("main") {
                 let _ = window.set_maximizable(false);
@@ -579,8 +652,10 @@ pub fn run() {
         })
         .on_window_event(|window, event| {
             if let tauri::WindowEvent::CloseRequested { api, .. } = event {
-                api.prevent_close();
-                let _ = window.hide();
+                if window.label() == "main" {
+                    api.prevent_close();
+                    let _ = window.hide();
+                }
             }
         })
         .invoke_handler(tauri::generate_handler![

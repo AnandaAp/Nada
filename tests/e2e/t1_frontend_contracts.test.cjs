@@ -347,7 +347,15 @@ test("T1-F6-06: src/index.html contains all required player, video, PiP, and rec
 test("T1-F7-01: playback skeleton reserves metadata space and respects reduced motion", () => {
   const css = fs.readFileSync(path.join(SRC_DIR, "styles.css"), "utf8");
   assert.match(css, /\.pmeta-skeleton\s*\{[^}]*position:\s*absolute/s);
-  assert.match(css, /\.skeleton-line::after\s*\{[^}]*animation:\s*skeleton-shimmer/s);
+  assert.match(css, /\.skeleton-line::after,\s*\.homecard-skeleton\s+\.homecover::after\s*\{[^}]*animation:\s*skeleton-shimmer/s);
   assert.match(css, /\.player\.is-loading\s+\.ptitle,[\s\S]*?\.player\.is-loading\s+\.partist\s*\{[^}]*visibility:\s*hidden/s);
-  assert.match(css, /@media\s*\(prefers-reduced-motion:\s*reduce\)\s*\{[\s\S]*?\.skeleton-line::after\s*\{\s*animation:\s*none/s);
+  assert.match(css, /@media\s*\(prefers-reduced-motion:\s*reduce\)\s*\{[\s\S]*?\.skeleton-line::after,\s*\.homecard-skeleton\s+\.homecover::after\s*\{\s*animation:\s*none/s);
+});
+
+test("T1-F7-02: home loading uses shimmering skeleton cards and respects reduced motion", () => {
+  const css = fs.readFileSync(path.join(SRC_DIR, "styles.css"), "utf8");
+  assert.match(css, /\.homecard-skeleton\s*\{[^}]*pointer-events:\s*none/s);
+  assert.match(css, /\.homecard-skeleton\s+\.homecover::after\s*\{[^}]*animation:\s*skeleton-shimmer/s);
+  assert.match(css, /\.homecard-skeleton\s+\.cardtitle\s*\{\s*height:\s*18px/s);
+  assert.match(css, /@media\s*\(prefers-reduced-motion:\s*reduce\)\s*\{[\s\S]*?\.homecard-skeleton\s+\.homecover::after\s*\{\s*animation:\s*none/s);
 });

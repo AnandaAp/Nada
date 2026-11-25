@@ -319,6 +319,35 @@ test('playback skeleton follows stream loading and buffering', async () => {
   assert.equal(p.get('playLoading').classList.contains('hidden'), true);
 });
 
+test('home sections show skeleton cards while loading and preserve empty/error states', () => {
+  const p = player();
+  p.state.homeData = {};
+  p.state.homeLoading = true;
+  p.renderHome();
+
+  const sections = p.get('homeSections').children;
+  assert.equal(sections.length, 4);
+  for (const section of sections) {
+    const cards = section.children.find((child) => (child.className || '').includes('homecards-skeleton'));
+    assert.ok(cards);
+    assert.equal(cards.children.length, 3);
+    assert.ok(cards.children.every((card) => (card.className || '').includes('homecard-skeleton')));
+  }
+
+  p.state.homeData.community = { items: [{ id: 'hit', name: 'Hit', artist: 'Art', kind: 'track' }] };
+  p.renderHome();
+  const loaded = p.get('homeSections').children[0];
+  assert.equal(loaded.children.some((child) => (child.className || '').includes('homecards-skeleton')), false);
+  const loadedCards = loaded.children.find((child) => (child.className || '').includes('homecards'));
+  assert.equal(loadedCards.children.length, 1);
+  assert.equal((loadedCards.children[0].className || '').includes('homecard-skeleton'), false);
+
+  p.state.homeData.community = { items: [], error: 'offline' };
+  p.renderHome();
+  const message = p.get('homeSections').children[0].children.find((child) => (child.className || '').includes('sectionmessage'));
+  assert.equal(message.textContent, 'Belum bisa dimuat. Coba Refresh.');
+});
+
 test('buffering pauses audio and does not repeatedly seek video', async () => {
   const p = queued(async command => command === 'streams' ? streams : undefined);
   await p.playCurrent();

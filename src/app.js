@@ -186,11 +186,31 @@ function renderHome() {
     sub.textContent = section.subtitle;
     block.append(heading, sub);
     const data = state.homeData[section.id];
-    if (!data || data.error || !data.items.length) {
+    if (!data) {
+      const cards = document.createElement("div");
+      cards.className = "homecards homecards-skeleton";
+      cards.setAttribute("role", "status");
+      cards.setAttribute("aria-label", "Lagi ngambil rekomendasi…");
+      cards.setAttribute("aria-busy", "true");
+      for (let i = 0; i < 3; i++) {
+        const card = document.createElement("div");
+        card.className = "homecard homecard-skeleton";
+        card.setAttribute("aria-hidden", "true");
+        const cover = document.createElement("div");
+        cover.className = "homecover";
+        const title = document.createElement("span");
+        title.className = "cardtitle skeleton-line";
+        const artist = document.createElement("span");
+        artist.className = "cardartist skeleton-line skeleton-artist";
+        card.append(cover, title, artist);
+        cards.appendChild(card);
+      }
+      block.appendChild(cards);
+    } else if (data.error || !data.items.length) {
       const message = document.createElement("p");
       message.className = "sectionmessage";
       message.setAttribute("role", "status");
-      message.textContent = !data ? "Lagi ngambil rekomendasi…" : data.error ? "Belum bisa dimuat. Coba Refresh." : "Belum ada rekomendasi tersedia.";
+      message.textContent = data.error ? "Belum bisa dimuat. Coba Refresh." : "Belum ada rekomendasi tersedia.";
       block.appendChild(message);
     } else {
       const cards = document.createElement("div");

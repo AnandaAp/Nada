@@ -662,3 +662,78 @@ test("T2-F7-06: playback skeleton shimmers without layout shift and clears when 
     await h.close();
   }
 });
+
+test("T2-F7-07: home skeleton cards shimmer and clear as sections load", async () => {
+  const pending = new Map();
+  let markAllRequested;
+  const allRequested = new Promise((resolve) => { markAllRequested = resolve; });
+  const h = await createBrowserHarness({
+    width: 430,
+    height: 640,
+    ipcHandlers: {
+      home_section: ({ section }) => new Promise((resolve) => {
+        pending.set(section, resolve);
+        if (pending.size === 4) markAllRequested();
+      }),
+    },
+  });
+  try {
+    await allRequested;
+    await h.edge.waitFor(() => document.querySelectorAll(".homecards-skeleton").length === 4);
+
+    const loading = await h.edge.evaluate(() => {
+      const group = document.querySelector(".homecards-skeleton");
+      const cover = group.querySelector(".homecover");
+      const line = group.querySelector(".skeleton-line");
+      return {
+        busy: group.getAttribute("aria-busy"),
+        count: group.querySelectorAll(".homecard-skeleton").length,
+        coverAnimation: getComputedStyle(cover, "::after").animationName,
+        lineAnimation: getComputedStyle(line, "::after").animationName,
+        cardHeight: group.querySelector(".homecard-skeleton").getBoundingClientRect().height,
+        scrollWidth: document.documentElement.scrollWidth,
+        loadingText: document.getElementById("homeSections").textContent.includes("Lagi ngambil rekomendasi"),
+      };
+    });
+    assert.equal(loading.busy, "true");
+    assert.equal(loading.count, 3);
+    assert.equal(loading.coverAnimation, "skeleton-shimmer");
+    assert.equal(loading.lineAnimation, "skeleton-shimmer");
+    assert.equal(loading.loadingText, false);
+    assert.ok(loading.scrollWidth <= 430, `Horizontal overflow while loading: ${loading.scrollWidth}`);
+
+    await h.edge.send("Emulation.setEmulatedMedia", {
+      features: [{ name: "prefers-reduced-motion", value: "reduce" }],
+    });
+    const reducedMotion = await h.edge.evaluate(() => {
+      const group = document.querySelector(".homecards-skeleton");
+      const card = group.querySelector(".homecard-skeleton");
+      const cover = card.querySelector(".homecover");
+      return {
+        card: getComputedStyle(card).animationName,
+        cover: getComputedStyle(cover, "::after").animationName,
+      };
+    });
+    assert.equal(reducedMotion.card, "none");
+    assert.equal(reducedMotion.cover, "none");
+
+    for (const [section, resolve] of pending) {
+      resolve({ items: [{ id: `hit-${section}`, name: "Hit", artist: "Art", kind: "track", video: false }] });
+    }
+    await h.edge.waitFor(
+      () => document.querySelectorAll(".homecards-skeleton").length === 0
+        && document.querySelectorAll(".homecard:not(.homecard-skeleton)").length === 4,
+      { label: "home cards loaded and skeletons cleared" }
+    );
+
+    const ready = await h.edge.evaluate(() => ({
+      cardHeight: document.querySelector(".homecard:not(.homecard-skeleton)").getBoundingClientRect().height,
+      firstTitle: document.querySelector(".homecard .cardtitle").textContent,
+    }));
+    assert.equal(ready.firstTitle, "Hit");
+    assert.ok(Math.abs(ready.cardHeight - loading.cardHeight) <= 1.5, `home skeleton card height ${loading.cardHeight} must match loaded ${ready.cardHeight}`);
+    assert.deepEqual(h.edge.pageErrors, []);
+  } finally {
+    await h.close();
+  }
+});

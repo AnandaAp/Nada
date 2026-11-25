@@ -981,6 +981,26 @@ mod tests {
     use super::*;
 
     #[test]
+    fn compile_time_jnn_key_uses_environment_then_repo_env() {
+        let repo_env = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .parent()
+            .expect("src-tauri has a parent")
+            .join(".env");
+        let expected = std::env::var("NADA_JNN_KEY")
+            .ok()
+            .map(|value| value.trim().to_string())
+            .filter(|value| !value.is_empty())
+            .or_else(|| read_jnn_key_from_env_file(&repo_env));
+        let Some(expected) = expected else {
+            return;
+        };
+        assert!(
+            option_env!("NADA_JNN_KEY") == Some(expected.as_str()),
+            "release builds must embed the configured BotGuard key"
+        );
+    }
+
+    #[test]
     fn extract_player_hash_parses_iframe_api() {
         let sample = r#"var scriptUrl = 'https:\/\/www.youtube.com\/s\/player\/b485e332\/www-widgetapi.vflset\/www-widgetapi.js';"#;
         assert_eq!(extract_player_hash(sample).as_deref(), Some("b485e332"));

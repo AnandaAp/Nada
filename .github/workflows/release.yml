@@ -90,6 +90,8 @@ jobs:
           }
 
       - name: Build Tauri Release & NSIS Installer
+        env:
+          NADA_JNN_KEY: ${{ secrets.NADA_JNN_KEY }}
         run: npm run build
 
       - name: Sign Binaries and Installer with SignTool

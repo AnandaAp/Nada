@@ -105,6 +105,26 @@ test("T1-F7-06: Cargo.toml uses rustls-tls and Rust sources never spawn external
   }
 });
 
+test("T1-F7-06A: release builds embed the BotGuard key without logging it", () => {
+  const buildRs = fs.readFileSync(path.join(TAURI_DIR, "build.rs"), "utf8");
+  assert.match(buildRs, /cargo:rerun-if-env-changed=NADA_JNN_KEY/);
+  assert.match(buildRs, /cargo:rerun-if-changed=/);
+  assert.match(buildRs, /join\("\.\.\/\.env"\)/);
+  assert.match(buildRs, /cargo:rustc-env=NADA_JNN_KEY=/);
+  assert.match(buildRs, /NADA_JNN_KEY is required for release builds/);
+  const logStatements = buildRs.split("\n").filter((line) => line.includes("println!"));
+  assert.ok(logStatements.every((line) => line.includes("cargo:")));
+
+  const release = fs.readFileSync(
+    path.join(REPO_ROOT, ".github", "workflows", "release.yml"),
+    "utf8"
+  );
+  assert.match(
+    release,
+    /name: Build Tauri Release & NSIS Installer\s+env:\s+NADA_JNN_KEY: \$\{\{ secrets\.NADA_JNN_KEY \}\}\s+run: npm run build/
+  );
+});
+
 test("T1-F7-07: package.json has zero runtime dependencies and preserves baseline test script", () => {
   const pkg = JSON.parse(fs.readFileSync(path.join(REPO_ROOT, "package.json"), "utf8"));
   assert.equal(pkg.dependencies, undefined, "package.json must have zero runtime dependencies");

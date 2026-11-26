@@ -219,6 +219,8 @@ function renderHome() {
       nav.className = "sectionnav";
       [-1, 1].forEach((direction) => {
         const arrow = document.createElement("button");
+        arrow.className = "lg-glass lg-button";
+        arrow.setAttribute("data-icon", "only");
         arrow.textContent = direction < 0 ? "‹" : "›";
         arrow.setAttribute("aria-label", `${direction < 0 ? "Sebelumnya" : "Berikutnya"}: ${section.title}`);
         arrow.addEventListener("click", () => { cards.scrollLeft += direction * cards.clientWidth; });
@@ -1528,8 +1530,16 @@ $("tabTracks").addEventListener("click", () => switchTab("tracks"));
 $("tabVideos").addEventListener("click", () => switchTab("videos"));
 function switchTab(kind) {
   state.kind = kind;
-  $("tabTracks").classList.toggle("active", kind === "tracks");
-  $("tabVideos").classList.toggle("active", kind === "videos");
+  const isTracks = kind === "tracks";
+  $("tabTracks").classList.toggle("active", isTracks);
+  $("tabVideos").classList.toggle("active", !isTracks);
+  if (isTracks) {
+    $("tabTracks").setAttribute("data-variant", "filled");
+    $("tabVideos").removeAttribute("data-variant");
+  } else {
+    $("tabVideos").setAttribute("data-variant", "filled");
+    $("tabTracks").removeAttribute("data-variant");
+  }
   if ($("search").value.trim()) doSearch();
 }
 

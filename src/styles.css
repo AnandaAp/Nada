@@ -79,6 +79,23 @@
   --ease-smooth: cubic-bezier(0.25, 1, 0.5, 1);
   --duration-fast: 150ms;
   --duration-normal: 240ms;
+
+  /* Glisse Liquid Glass Tokens (Dark Theme) */
+  --lg-foreground: #f5f5f7;
+  --lg-muted: #acacb6;
+  --lg-glass: rgba(40, 40, 44, 0.58);
+  --lg-glass-active: rgba(72, 72, 80, 0.72);
+  --lg-edge: rgba(255, 255, 255, 0.12);
+  --lg-drop: rgba(0, 0, 0, 0.28);
+  --lg-fill: #d97706;
+  --lg-tint: #d97706;
+  --lg-button-fill: #d97706;
+  --lg-rim: none;
+  --lg-rim-shine: 0.16;
+  --lg-blur: 6px;
+  --lg-filter: saturate(1.5);
+  --lg-x: 50%;
+  --lg-y: 50%;
 }
 
 /* Base Reset & Controls */
@@ -114,7 +131,7 @@ button, [role="button"], label, .homecard, .result, .qitem {
   cursor: pointer;
 }
 
-button {
+button:not(.lg-button) {
   background: none;
   border: none;
   color: var(--text-muted);
@@ -131,12 +148,12 @@ button {
               box-shadow 0.15s var(--ease-smooth);
 }
 
-button:hover {
+button:not(.lg-button):hover {
   color: var(--text-main);
   background: var(--surface-card);
 }
 
-button:active:not(:disabled) {
+button:not(.lg-button):active:not(:disabled) {
   transform: scale(0.97) translateY(1px);
 }
 
@@ -148,7 +165,100 @@ button:focus-visible, input:focus-visible, .result:focus-visible {
 button:disabled {
   opacity: 0.45;
   cursor: default;
-  pointer-events: none;
+}
+
+/* Glisse Liquid Glass & Button */
+.lg-glass {
+  position: relative;
+  background-color: var(--lg-glass);
+  background-image: var(--lg-rim, none);
+  background-size: 100% 100%;
+  -webkit-backdrop-filter: blur(var(--lg-blur, 6px)) var(--lg-filter, saturate(1.5));
+  backdrop-filter: blur(var(--lg-blur, 6px)) var(--lg-filter, saturate(1.5));
+  box-shadow:
+    inset 0 0 0 0.5px var(--lg-edge),
+    0 1px 3px var(--lg-drop);
+}
+
+.lg-glass[data-rim] {
+  box-shadow: 0 1px 3px var(--lg-drop);
+}
+
+.lg-button {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 8px;
+  height: 40px;
+  padding: 0 16px;
+  border: 0;
+  border-radius: 999px;
+  color: var(--lg-foreground);
+  font: inherit;
+  font-size: 13px;
+  cursor: pointer;
+  touch-action: manipulation;
+  -webkit-tap-highlight-color: transparent;
+  -webkit-touch-callout: none;
+  user-select: none;
+  -webkit-user-select: none;
+  transition: background-color 200ms ease, color 150ms ease, opacity 150ms ease;
+}
+
+.lg-button[data-icon] {
+  padding-left: 12px;
+}
+
+.lg-button[data-icon="only"] {
+  width: 40px;
+  padding: 0;
+}
+
+.lg-button > svg {
+  flex: none;
+  width: 18px;
+  height: 18px;
+}
+
+.lg-button:is(:active, [data-pressed]) {
+  background-color: var(--lg-glass-active);
+  transition-duration: 0s;
+}
+
+@media (hover: hover) and (pointer: fine) {
+  .lg-button:hover {
+    background-color: var(--lg-glass-active);
+  }
+}
+
+.lg-button:disabled {
+  background-color: var(--lg-glass);
+  opacity: 0.35;
+  cursor: default;
+}
+
+.lg-button:is([data-tint], [data-destructive]) {
+  color: var(--lg-tint);
+}
+
+.lg-button[data-variant="filled"] {
+  --lg-button-fill: var(--lg-tint, var(--lg-fill));
+  color: #fff;
+}
+
+.lg-button[data-variant="filled"],
+.lg-button[data-variant="filled"]:disabled {
+  background-color: var(--lg-button-fill);
+}
+
+.lg-button[data-variant="filled"]:is(:active, [data-pressed]) {
+  background-color: color-mix(in srgb, var(--lg-button-fill) 85%, #000);
+}
+
+@media (hover: hover) and (pointer: fine) {
+  .lg-button[data-variant="filled"]:hover {
+    background-color: color-mix(in srgb, var(--lg-button-fill) 92%, #fff);
+  }
 }
 
 /* ==========================================================================
@@ -214,19 +324,12 @@ header {
 }
 
 .homebtn {
+  height: 28px;
+  padding: 0 12px;
   font-size: 12px;
   font-weight: 600;
-  color: var(--text-muted);
-  padding: 4px 10px;
-  border-radius: var(--radius-item);
-  background: var(--surface-card);
-  border: 1px solid var(--border-subtle);
-}
-
-.homebtn:hover {
   color: var(--text-main);
-  background: var(--surface-card-hover);
-  border-color: var(--border-strong);
+  border-radius: var(--radius-pill);
 }
 
 .searchwrap {
@@ -236,7 +339,7 @@ header {
   background: var(--surface-panel);
   border: 1px solid var(--border-subtle);
   border-radius: var(--radius-inner);
-  padding: 2px 8px 2px 12px;
+  padding: 2px 6px 2px 12px;
   box-shadow: inset 0 2px 4px rgba(0, 0, 0, 0.3);
   transition: border-color 0.15s var(--ease-smooth), box-shadow 0.15s var(--ease-smooth);
 }
@@ -263,9 +366,10 @@ header {
 }
 
 #clearSearch {
+  width: 26px;
+  height: 26px;
   font-size: 15px;
-  padding: 2px 6px;
-  color: var(--text-dimmed);
+  color: var(--text-muted);
 }
 
 #clearSearch:hover {
@@ -273,8 +377,9 @@ header {
 }
 
 #searchBtn {
+  width: 28px;
+  height: 28px;
   color: var(--text-muted);
-  padding: 4px;
 }
 
 #searchBtn:hover {
@@ -292,25 +397,23 @@ header {
 }
 
 .tab {
-  padding: 4px 14px;
+  height: 26px;
+  padding: 0 14px;
   border-radius: var(--radius-pill);
   font-size: 11.5px;
   font-weight: 600;
   color: var(--text-muted);
-  border: 1px solid transparent;
 }
 
 .tab:hover {
   color: var(--text-main);
-  background: var(--surface-card);
 }
 
 .tab.active {
-  background: var(--glass-terracotta);
+  --lg-tint: var(--glass-terracotta);
   color: var(--glass-parchment);
   font-weight: 700;
   box-shadow: 0 2px 8px rgba(214, 90, 56, 0.35);
-  border-color: rgba(244, 239, 230, 0.15);
 }
 
 /* ==========================================================================
@@ -382,20 +485,15 @@ main {
   gap: 4px;
 }
 
-.sectionnav button {
-  width: 26px;
+.sectionnav button.lg-button {
+  width: 28px;
   height: 28px;
-  font-size: 18px;
-  border-radius: var(--radius-item);
-  background: var(--surface-card);
-  border: 1px solid var(--border-subtle);
+  font-size: 16px;
   color: var(--text-muted);
 }
 
-.sectionnav button:hover {
-  background: var(--surface-card-hover);
+.sectionnav button.lg-button:hover {
   color: var(--text-main);
-  border-color: var(--border-strong);
 }
 
 .homecards {
@@ -513,19 +611,15 @@ main {
 }
 
 #backHome {
+  height: 28px;
+  padding: 0 12px;
   font-size: 12px;
   font-weight: 600;
-  padding: 5px 10px;
-  border-radius: var(--radius-item);
-  background: var(--surface-card);
-  border: 1px solid var(--border-subtle);
   color: var(--text-muted);
 }
 
 #backHome:hover {
   color: var(--text-main);
-  background: var(--surface-card-hover);
-  border-color: var(--border-strong);
 }
 
 /* ==========================================================================
@@ -696,25 +790,16 @@ main {
   display: none !important;
 }
 
-.stage-pip-btn {
+.stage-pip-btn.lg-button {
   position: absolute;
   top: 10px;
   right: 10px;
   width: 32px;
   height: 32px;
-  border-radius: var(--radius-item);
-  background: rgba(18, 20, 26, 0.8);
-  backdrop-filter: blur(8px);
-  -webkit-backdrop-filter: blur(8px);
-  border: 1px solid var(--border-subtle);
   color: var(--text-dimmed);
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  cursor: pointer;
   z-index: 10;
   opacity: 0;
-  transition: opacity 0.2s ease, color 0.15s ease, background-color 0.15s ease, border-color 0.15s ease;
+  transition: opacity 0.2s ease, color 0.15s ease, background-color 200ms ease;
 }
 
 .stage:hover .stage-pip-btn,
@@ -723,15 +808,12 @@ main {
   opacity: 1;
 }
 
-.stage-pip-btn:hover {
-  background: rgba(30, 34, 45, 0.95);
+.stage-pip-btn.lg-button:hover {
   color: var(--accent-brass-hover);
-  border-color: var(--accent-brass);
 }
 
-.stage-pip-btn.active {
+.stage-pip-btn.lg-button.active {
   color: var(--accent-gold);
-  border-color: var(--accent-brass);
 }
 
 /* ==========================================================================
@@ -918,28 +1000,30 @@ input[type="range"]:hover::-webkit-slider-thumb {
 .pcontrols {
   display: flex;
   align-items: center;
-  gap: 4px;
+  gap: 6px;
+}
+
+.pcontrols .lg-button:not(.play) {
+  width: 34px;
+  height: 34px;
+  color: var(--text-muted);
+}
+
+.pcontrols .lg-button:not(.play):hover {
+  color: var(--text-main);
 }
 
 /* Forged Brass Hero Play Button */
-.pcontrols .play {
+.pcontrols .play.lg-button {
   width: 40px;
   height: 40px;
-  border-radius: 50%;
-  background: var(--accent-brass);
-  border: 1px solid var(--accent-brass-hover);
+  --lg-tint: var(--accent-brass);
   color: #111110;
   box-shadow: 0 4px 14px var(--accent-brass-glow);
 }
 
-.pcontrols .play:hover {
-  background: var(--accent-brass-hover);
+.pcontrols .play.lg-button:hover {
   color: #111110;
-  transform: translateY(-1px);
-}
-
-.pcontrols .play:active {
-  transform: scale(0.95) translateY(1px);
 }
 
 .play-loading {
@@ -967,46 +1051,35 @@ input[type="range"]:hover::-webkit-slider-thumb {
   gap: 8px;
 }
 
-/* Icon Buttons with Tactile Spring Press */
-.iconbtn {
+/* Icon Buttons with Glisse Liquid Glass */
+.iconbtn.lg-button {
   position: relative;
-  display: inline-flex;
-  align-items: center;
-  justify-content: center;
   width: 32px;
   height: 32px;
-  border-radius: var(--radius-item);
   color: var(--text-muted);
-  background: transparent;
-  border: 1px solid transparent;
-  cursor: pointer;
-  transition: all 0.15s var(--ease-smooth);
   padding: 0;
 }
 
-.iconbtn:hover {
+.iconbtn.lg-button:hover {
   color: var(--text-main);
-  background: var(--surface-card);
-  border-color: var(--border-subtle);
 }
 
 /* Active Terracotta Glass Highlight */
-.iconbtn.active {
-  background: rgba(214, 90, 56, 0.22);
-  border-color: rgba(214, 90, 56, 0.45);
+.iconbtn.lg-button.active {
+  background-color: rgba(214, 90, 56, 0.28);
   color: var(--glass-parchment);
   box-shadow: 0 2px 8px rgba(214, 90, 56, 0.25);
 }
 
-.iconbtn.active:hover {
-  background: rgba(214, 90, 56, 0.32);
+.iconbtn.lg-button.active:hover {
+  background-color: rgba(214, 90, 56, 0.38);
   color: var(--glass-parchment);
 }
 
 .repeat-badge {
   position: absolute;
-  top: 1px;
-  right: 1px;
+  top: 0;
+  right: 0;
   font-family: var(--font-mono);
   font-size: 8px;
   font-weight: 700;
@@ -1021,27 +1094,21 @@ input[type="range"]:hover::-webkit-slider-thumb {
   box-shadow: 0 1px 4px rgba(0, 0, 0, 0.4);
 }
 
-.chip {
+.chip.lg-button {
+  height: 26px;
+  padding: 0 12px;
   font-size: 11px;
   font-weight: 600;
-  padding: 3px 10px;
-  border-radius: var(--radius-pill);
-  border: 1px solid var(--border-subtle);
-  background: var(--surface-card);
   color: var(--text-muted);
-  transition: all 0.15s var(--ease-smooth);
 }
 
-.chip:hover {
+.chip.lg-button:hover {
   color: var(--text-main);
-  background: var(--surface-card-hover);
-  border-color: var(--border-strong);
 }
 
-.chip.on {
-  border-color: var(--status-in-tune-border);
+.chip.lg-button.on {
   color: var(--status-in-tune);
-  background: var(--status-in-tune-bg);
+  background-color: var(--status-in-tune-bg);
 }
 
 /* ==========================================================================
@@ -1074,16 +1141,15 @@ input[type="range"]:hover::-webkit-slider-thumb {
   border-bottom: 1px solid var(--border-subtle);
 }
 
-#queueClose {
-  font-size: 13px;
-  padding: 4px 8px;
-  border-radius: var(--radius-item);
+#queueClose.lg-button {
+  width: 28px;
+  height: 28px;
+  font-size: 12px;
   color: var(--text-muted);
 }
 
-#queueClose:hover {
+#queueClose.lg-button:hover {
   color: var(--text-main);
-  background: var(--surface-card);
 }
 
 #queueList {

@@ -450,20 +450,52 @@ fn load_embedded_icons() -> (Option<egui::IconData>, Option<Icon>) {
     (Some(egui_icon), tray_icon)
 }
 
+fn try_wake_existing_instance(wake_port_path: &std::path::Path) {
+    let Ok(raw) = std::fs::read_to_string(wake_port_path) else {
+        return;
+    };
+    let Ok(port) = raw.trim().parse::<u16>() else {
+        return;
+    };
+    let addr = std::net::SocketAddr::from(([127, 0, 0, 1], port));
+    if let Ok(mut stream) =
+        std::net::TcpStream::connect_timeout(&addr, std::time::Duration::from_millis(500))
+    {
+        use std::io::Write;
+        let _ = stream.write_all(b"SHOW\n");
+        let _ = stream.flush();
+    }
+}
+
+fn start_wake_listener(wake_port_path: &std::path::Path) -> Option<std::net::TcpListener> {
+    let listener = std::net::TcpListener::bind(("127.0.0.1", 0)).ok()?;
+    let port = listener.local_addr().ok()?.port();
+    if let Some(parent) = wake_port_path.parent() {
+        let _ = std::fs::create_dir_all(parent);
+    }
+    let _ = std::fs::write(wake_port_path, port.to_string());
+    Some(listener)
+}
+
 pub fn run() {
+    let storage_dir = resolve_storage_dir();
+    let wake_port_file = storage_dir.join("wake.port");
+
     let instance = SingleInstance::new("com.anand.nada.single_instance");
     if let Ok(inst) = &instance {
         if !inst.is_single() {
+            try_wake_existing_instance(&wake_port_file);
             return;
         }
     }
+
+    let wake_listener = start_wake_listener(&wake_port_file);
 
     let rt = tokio::runtime::Builder::new_multi_thread()
         .enable_all()
         .build()
         .expect("failed to build tokio runtime");
 
-    let storage_dir = resolve_storage_dir();
     let backend = Arc::new(
         Backend::init(storage_dir).expect("failed to initialize Nada native backend"),
     );
@@ -477,7 +509,9 @@ pub fn run() {
     let (tray_tx, tray_rx) = mpsc::channel::<ui::TrayCmd>();
     let allow_quit = Arc::new(AtomicBool::new(false));
 
-    // Set up native OS system tray (Buka Nada / Play-Pause / Keluar)
+    // Set up native OS system tray (Buka Nada / Play-Pause / Keluar).
+    // IMPORTANT: `tray_handle` MUST live in `run()` for the entire lifetime of `eframe::run_native`
+    // (NOT moved into the AppCreator closure where it would be dropped immediately after startup).
     let menu = Menu::new();
     let show_item = MenuItem::new("Buka Nada", true, None);
     let toggle_item = MenuItem::new("Play / Pause", true, None);
@@ -495,6 +529,7 @@ pub fn run() {
         tray_builder = tray_builder.with_icon(ic);
     }
     let tray_handle = tray_builder.build().ok();
+    let has_tray = tray_handle.is_some();
 
     let rt_handle = rt.handle().clone();
 
@@ -515,19 +550,41 @@ pub fn run() {
         ..Default::default()
     };
 
-    eframe::run_native(
+    let run_res = eframe::run_native(
         "Nada",
         native_options,
         Box::new(move |cc| {
+            // Wake-up listener thread: restores & focuses the window when a second instance is launched.
+            if let Some(listener) = wake_listener {
+                let ctx_wake = cc.egui_ctx.clone();
+                let tx_wake = tray_tx.clone();
+                std::thread::spawn(move || {
+                    for stream in listener.incoming().flatten() {
+                        drop(stream);
+                        let _ = tx_wake.send(ui::TrayCmd::ShowWindow);
+                        ctx_wake.send_viewport_cmd(egui::ViewportCommand::Visible(true));
+                        ctx_wake.send_viewport_cmd(egui::ViewportCommand::Minimized(false));
+                        ctx_wake.send_viewport_cmd(egui::ViewportCommand::Focus);
+                        ctx_wake.request_repaint();
+                    }
+                });
+            }
+
             let ctx_menu = cc.egui_ctx.clone();
             let tx_menu = tray_tx.clone();
+            let allow_quit_menu = allow_quit.clone();
             MenuEvent::set_event_handler(Some(Arc::new(move |event: MenuEvent| {
                 if event.id == show_id {
                     let _ = tx_menu.send(ui::TrayCmd::ShowWindow);
+                    ctx_menu.send_viewport_cmd(egui::ViewportCommand::Visible(true));
+                    ctx_menu.send_viewport_cmd(egui::ViewportCommand::Minimized(false));
+                    ctx_menu.send_viewport_cmd(egui::ViewportCommand::Focus);
                 } else if event.id == toggle_id {
                     let _ = tx_menu.send(ui::TrayCmd::TogglePlay);
                 } else if event.id == quit_id {
+                    allow_quit_menu.store(true, std::sync::atomic::Ordering::Release);
                     let _ = tx_menu.send(ui::TrayCmd::Quit);
+                    ctx_menu.send_viewport_cmd(egui::ViewportCommand::Close);
                 }
                 ctx_menu.request_repaint();
             })));
@@ -542,13 +599,14 @@ pub fn run() {
                 } = event
                 {
                     let _ = tx_tray.send(ui::TrayCmd::ShowWindow);
+                    ctx_tray.send_viewport_cmd(egui::ViewportCommand::Visible(true));
+                    ctx_tray.send_viewport_cmd(egui::ViewportCommand::Minimized(false));
+                    ctx_tray.send_viewport_cmd(egui::ViewportCommand::Focus);
                     ctx_tray.request_repaint();
                 }
             }));
 
-            // Keep tray_handle alive inside closure for tooltip updates
             let tooltip_cb: Option<Box<dyn Fn(&str) + Send>> = None;
-            let _keep_tray = tray_handle;
 
             Ok(Box::new(ui::NadaApp::new(
                 cc,
@@ -557,10 +615,18 @@ pub fn run() {
                 tray_rx,
                 tooltip_cb,
                 allow_quit,
+                has_tray,
             )))
         }),
-    )
-    .expect("error while running Nada native desktop UI");
+    );
+
+    let _ = std::fs::remove_file(&wake_port_file);
+    drop(tray_handle);
+    drop(instance);
+    rt.shutdown_background();
+
+    run_res.expect("error while running Nada native desktop UI");
+    std::process::exit(0);
 }
 
 #[cfg(test)]

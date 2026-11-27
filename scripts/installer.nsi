@@ -1,7 +1,7 @@
 !include "MUI2.nsh"
 
 !ifndef VERSION
-  !define VERSION "0.1.3"
+  !define VERSION "0.2.0"
 !endif
 
 !ifndef EXE_PATH
@@ -39,6 +39,13 @@ Unicode True
 !insertmacro MUI_LANGUAGE "English"
 
 Section "Nada Desktop Player" SecMain
+  ; Close any running Nada instance (old v0.1.x or hidden v0.2.x) before overwriting
+  nsExec::ExecToLog 'taskkill /F /IM nada.exe'
+  Sleep 400
+
+  ; Remove legacy v0.1.x Start Menu shortcut so Start Menu launches the new install
+  Delete "$SMPROGRAMS\Nada.lnk"
+
   SetOutPath "$INSTDIR"
   File "${EXE_PATH}"
   File "${ICON_PATH}"

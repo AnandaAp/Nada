@@ -250,6 +250,7 @@ pub struct NadaApp {
     tray_rx: mpsc::Receiver<TrayCmd>,
     tray_tooltip_cb: Option<Box<dyn Fn(&str) + Send>>,
     allow_quit: Arc<AtomicBool>,
+    has_tray: bool,
 
     // Navigation & data state
     view: ActiveView,
@@ -291,6 +292,7 @@ impl NadaApp {
         tray_rx: mpsc::Receiver<TrayCmd>,
         tray_tooltip_cb: Option<Box<dyn Fn(&str) + Send>>,
         allow_quit: Arc<AtomicBool>,
+        has_tray: bool,
     ) -> Self {
         configure_visuals(&cc.egui_ctx);
 
@@ -346,6 +348,7 @@ impl NadaApp {
             tray_rx,
             tray_tooltip_cb,
             allow_quit,
+            has_tray,
             view: ActiveView::Home,
             view_id: 1,
             search_query: String::new(),
@@ -1957,7 +1960,9 @@ impl eframe::App for NadaApp {
         let ctx = ui.ctx().clone();
 
         // Intercept close button -> hide to tray while keeping audio playback alive
-        if ctx.input(|i| i.viewport().close_requested()) && !self.allow_quit.load(Ordering::Acquire)
+        if ctx.input(|i| i.viewport().close_requested())
+            && self.has_tray
+            && !self.allow_quit.load(Ordering::Acquire)
         {
             ctx.send_viewport_cmd(ViewportCommand::CancelClose);
             ctx.send_viewport_cmd(ViewportCommand::Visible(false));

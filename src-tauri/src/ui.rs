@@ -1708,24 +1708,14 @@ impl NadaApp {
         let dur = self.effective_duration(snap);
         let cur = self.seeking_val.unwrap_or(snap.position_secs).clamp(0.0, dur.max(0.0));
 
-        // Outer ambient tray so the Liquid Glass dock floats cleanly above the bottom edge
-        Frame::new()
-            .fill(BG_STUDIO)
-            .inner_margin(Margin {
-                left: 10,
-                right: 10,
-                top: 6,
-                bottom: 10,
-            })
+        // Reserve background layer index so the Liquid Glass card paints cleanly behind
+        // the controls with fully transparent outer margins showing scrolled content behind.
+        let bg_shape_idx = ui.painter().add(Shape::Noop);
+        let inner = Frame::new()
+            .fill(Color32::TRANSPARENT)
+            .corner_radius(CornerRadius::same(18))
+            .inner_margin(Margin::symmetric(14, 11))
             .show(ui, |ui| {
-                // Reserve background layer index so we can paint the multi-layer Liquid Glass
-                // optical surface behind the interactive controls once the dock rect is known.
-                let bg_shape_idx = ui.painter().add(Shape::Noop);
-                let inner = Frame::new()
-                    .fill(Color32::TRANSPARENT)
-                    .corner_radius(CornerRadius::same(18))
-                    .inner_margin(Margin::symmetric(14, 11))
-                    .show(ui, |ui| {
                 // Row 1: Progress bar
                 ui.horizontal(|ui| {
                     ui.label(
@@ -2040,24 +2030,25 @@ impl NadaApp {
                     Color32::from_rgba_unmultiplied(0, 0, 0, 96),
                 ));
 
-                // 2. Seamless smoked dark frosted glass body (zero hard horizontal bands)
+                // 2. Seamless frosted dark glass body (translucent enough to feel floating,
+                //    dense enough to keep controls and text razor-sharp)
                 glass_shapes.push(Shape::rect_filled(
                     dock_rect,
                     radius,
-                    Color32::from_rgba_unmultiplied(24, 25, 34, 246),
+                    Color32::from_rgba_unmultiplied(22, 23, 33, 228),
                 ));
 
                 // 3. Crisp dual-layer specular glass rim + subtle inner bevel
                 glass_shapes.push(Shape::rect_stroke(
                     dock_rect,
                     radius,
-                    Stroke::new(1.0, Color32::from_rgba_unmultiplied(255, 255, 255, 34)),
+                    Stroke::new(1.0, Color32::from_rgba_unmultiplied(255, 255, 255, 38)),
                     StrokeKind::Inside,
                 ));
                 glass_shapes.push(Shape::rect_stroke(
                     dock_rect.shrink(1.0),
                     CornerRadius::same(17),
-                    Stroke::new(0.75, Color32::from_rgba_unmultiplied(255, 255, 255, 12)),
+                    Stroke::new(0.75, Color32::from_rgba_unmultiplied(255, 255, 255, 14)),
                     StrokeKind::Inside,
                 ));
 
@@ -2067,11 +2058,10 @@ impl NadaApp {
                         Pos2::new(dock_rect.left() + 20.0, dock_rect.top() + 1.0),
                         Pos2::new(dock_rect.right() - 20.0, dock_rect.top() + 1.0),
                     ],
-                    Stroke::new(1.0, Color32::from_rgba_unmultiplied(255, 255, 255, 76)),
+                    Stroke::new(1.0, Color32::from_rgba_unmultiplied(255, 255, 255, 80)),
                 ));
 
                 ui.painter().set(bg_shape_idx, Shape::Vec(glass_shapes));
-            });
     }
 
     fn render_main_body(&mut self, ui: &mut Ui) {
@@ -2097,6 +2087,8 @@ impl NadaApp {
                             self.render_tracks_list(ui, &ctx, Some(&title))
                         }
                     });
+                // Bottom scroll clearance so the last item can scroll clear of the floating dock
+                ui.add_space(146.0);
             });
     }
 
@@ -2495,7 +2487,7 @@ impl NadaApp {
 
         // Translucent dark scrim behind the sheet: click outside to dismiss
         egui::Area::new(Id::unique("queue_scrim"))
-            .order(Order::Middle)
+            .order(Order::Foreground)
             .fixed_pos(screen.min)
             .show(ctx, |ui| {
                 let (r, resp) = ui.allocate_exact_size(screen.size(), Sense::click());
@@ -2702,20 +2694,33 @@ impl eframe::App for NadaApp {
                 self.render_header(ui);
             });
 
-        egui::Panel::bottom("nada_player_dock")
-            .frame(Frame::NONE)
-            .show_separator_line(false)
-            .show(ui, |ui| {
-                if self.want_video && !self.pip_open {
+        if self.want_video && !self.pip_open {
+            egui::Panel::bottom("nada_video_stage")
+                .frame(Frame::new().fill(BG_STUDIO))
+                .show_separator_line(false)
+                .show(ui, |ui| {
                     self.render_video_stage(ui);
-                }
-                self.render_player_dock(ui, &snap);
-            });
+                    // Reserve space beneath the video stage for the floating Liquid Glass dock
+                    ui.add_space(146.0);
+                });
+        }
 
         egui::CentralPanel::default()
             .frame(Frame::new().fill(BG_STUDIO))
             .show(ui, |ui| {
                 self.render_main_body(ui);
+            });
+
+        // True floating Liquid Glass dock: transparent side/bottom margins reveal scrolled content behind
+        let screen = ctx.content_rect();
+        let dock_w = (screen.width() - 20.0).max(260.0);
+        egui::Area::new(Id::unique("nada_floating_dock"))
+            .order(Order::Middle)
+            .anchor(egui::Align2::CENTER_BOTTOM, Vec2::new(0.0, -10.0))
+            .constrain_to(screen)
+            .show(&ctx, |ui| {
+                ui.set_width(dock_w);
+                self.render_player_dock(ui, &snap);
             });
 
         self.render_queue_drawer(&ctx);

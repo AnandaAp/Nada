@@ -28,10 +28,495 @@ const ACCENT_GOLD: Color32 = Color32::from_rgb(245, 158, 11); // #f59e0b
 const GLASS_TERRACOTTA: Color32 = Color32::from_rgb(214, 90, 56); // #d65a38
 const STATUS_JADE: Color32 = Color32::from_rgb(16, 185, 129); // #10b981
 
-const GLASS_BASE: Color32 = Color32::from_rgba_premultiplied(36, 36, 42, 175);
-const GLASS_HOVER: Color32 = Color32::from_rgba_premultiplied(58, 58, 68, 205);
-const GLASS_EDGE: Color32 = Color32::from_rgba_premultiplied(255, 255, 255, 34);
-const GLASS_RIM_LIGHT: Color32 = Color32::from_rgba_premultiplied(255, 252, 245, 68);
+// Properly premultiplied RGBA (every RGB channel <= alpha, avoiding additive white bloom)
+const GLASS_BASE: Color32 = Color32::from_rgba_premultiplied(28, 28, 34, 195);
+const GLASS_HOVER: Color32 = Color32::from_rgba_premultiplied(48, 48, 58, 225);
+const GLASS_EDGE: Color32 = Color32::from_rgba_premultiplied(22, 22, 22, 22);
+const GLASS_RIM_LIGHT: Color32 = Color32::from_rgba_premultiplied(34, 33, 32, 34);
+
+// ============================================================================
+// Crisp Vector Icons & Studio Precision Controls (Zero Missing-Glyph Tofu)
+// ============================================================================
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub enum IconKind {
+    Search,
+    Clear,
+    Prev,
+    Play,
+    Pause,
+    Loading,
+    Next,
+    Repeat,
+    RepeatOne,
+    Shuffle,
+    Queue,
+    Pip,
+    Volume,
+    VolumeMuted,
+}
+
+fn paint_rounded_image(
+    painter: &egui::Painter,
+    rect: Rect,
+    tex_id: egui::TextureId,
+    radius: u8,
+) {
+    let uv = Rect::from_min_max(Pos2::ZERO, Pos2::new(1.0, 1.0));
+    let shape = egui::epaint::RectShape::filled(rect, CornerRadius::same(radius), Color32::WHITE)
+        .with_texture(tex_id, uv);
+    painter.add(Shape::Rect(shape));
+}
+
+fn paint_icon(
+    ui: &Ui,
+    painter: &egui::Painter,
+    center: Pos2,
+    size: f32,
+    kind: IconKind,
+    color: Color32,
+) {
+    let s = size * 0.5;
+    let stroke = Stroke::new((size * 0.115).clamp(1.4, 2.2), color);
+
+    match kind {
+        IconKind::Search => {
+            let r = s * 0.56;
+            let c = Pos2::new(center.x - s * 0.16, center.y - s * 0.16);
+            painter.circle_stroke(c, r, stroke);
+            let dir = Vec2::new(0.707, 0.707);
+            painter.line_segment([c + dir * r, center + Vec2::new(s * 0.78, s * 0.78)], stroke);
+        }
+        IconKind::Clear => {
+            let d = s * 0.56;
+            painter.line_segment(
+                [Pos2::new(center.x - d, center.y - d), Pos2::new(center.x + d, center.y + d)],
+                stroke,
+            );
+            painter.line_segment(
+                [Pos2::new(center.x + d, center.y - d), Pos2::new(center.x - d, center.y + d)],
+                stroke,
+            );
+        }
+        IconKind::Play => {
+            // Optically centered right-pointing triangle
+            let ox = s * 0.12;
+            let pts = vec![
+                Pos2::new(center.x - s * 0.52 + ox, center.y - s * 0.68),
+                Pos2::new(center.x + s * 0.72 + ox, center.y),
+                Pos2::new(center.x - s * 0.52 + ox, center.y + s * 0.68),
+            ];
+            painter.add(Shape::convex_polygon(pts, color, Stroke::NONE));
+        }
+        IconKind::Pause => {
+            let bar_w = (s * 0.36).max(2.6);
+            let bar_h = s * 1.24;
+            let gap = s * 0.24;
+            let r = CornerRadius::same(2);
+            painter.rect_filled(
+                Rect::from_center_size(
+                    Pos2::new(center.x - gap - bar_w * 0.5, center.y),
+                    Vec2::new(bar_w, bar_h),
+                ),
+                r,
+                color,
+            );
+            painter.rect_filled(
+                Rect::from_center_size(
+                    Pos2::new(center.x + gap + bar_w * 0.5, center.y),
+                    Vec2::new(bar_w, bar_h),
+                ),
+                r,
+                color,
+            );
+        }
+        IconKind::Loading => {
+            let t = ui.input(|i| i.time) as f32;
+            ui.ctx().request_repaint();
+            let r = s * 0.66;
+            let segs = 14;
+            let start = t * 5.0;
+            let sweep = std::f32::consts::PI * 1.35;
+            let pts: Vec<Pos2> = (0..=segs)
+                .map(|i| {
+                    let a = start + sweep * (i as f32 / segs as f32);
+                    Pos2::new(center.x + a.cos() * r, center.y + a.sin() * r)
+                })
+                .collect();
+            painter.add(Shape::line(pts, Stroke::new(2.0, color)));
+        }
+        IconKind::Prev => {
+            let bar_w = (s * 0.24).max(2.0);
+            let h = s * 1.1;
+            painter.rect_filled(
+                Rect::from_center_size(
+                    Pos2::new(center.x - s * 0.58, center.y),
+                    Vec2::new(bar_w, h),
+                ),
+                CornerRadius::same(1),
+                color,
+            );
+            let pts = vec![
+                Pos2::new(center.x + s * 0.62, center.y - h * 0.5),
+                Pos2::new(center.x - s * 0.36, center.y),
+                Pos2::new(center.x + s * 0.62, center.y + h * 0.5),
+            ];
+            painter.add(Shape::convex_polygon(pts, color, Stroke::NONE));
+        }
+        IconKind::Next => {
+            let bar_w = (s * 0.24).max(2.0);
+            let h = s * 1.1;
+            painter.rect_filled(
+                Rect::from_center_size(
+                    Pos2::new(center.x + s * 0.58, center.y),
+                    Vec2::new(bar_w, h),
+                ),
+                CornerRadius::same(1),
+                color,
+            );
+            let pts = vec![
+                Pos2::new(center.x - s * 0.62, center.y - h * 0.5),
+                Pos2::new(center.x + s * 0.36, center.y),
+                Pos2::new(center.x - s * 0.62, center.y + h * 0.5),
+            ];
+            painter.add(Shape::convex_polygon(pts, color, Stroke::NONE));
+        }
+        IconKind::Repeat | IconKind::RepeatOne => {
+            let w = s * 0.78;
+            let h = s * 0.52;
+            let arr = s * 0.28;
+            // Top path -> right
+            painter.add(Shape::line(
+                vec![
+                    Pos2::new(center.x - w, center.y - h * 0.2),
+                    Pos2::new(center.x - w, center.y - h),
+                    Pos2::new(center.x + w, center.y - h),
+                ],
+                stroke,
+            ));
+            // Top-right arrowhead
+            painter.add(Shape::line(
+                vec![
+                    Pos2::new(center.x + w - arr, center.y - h - arr),
+                    Pos2::new(center.x + w, center.y - h),
+                    Pos2::new(center.x + w - arr, center.y - h + arr),
+                ],
+                stroke,
+            ));
+            // Bottom path -> left
+            painter.add(Shape::line(
+                vec![
+                    Pos2::new(center.x + w, center.y + h * 0.2),
+                    Pos2::new(center.x + w, center.y + h),
+                    Pos2::new(center.x - w, center.y + h),
+                ],
+                stroke,
+            ));
+            // Bottom-left arrowhead
+            painter.add(Shape::line(
+                vec![
+                    Pos2::new(center.x - w + arr, center.y + h - arr),
+                    Pos2::new(center.x - w, center.y + h),
+                    Pos2::new(center.x - w + arr, center.y + h + arr),
+                ],
+                stroke,
+            ));
+            if kind == IconKind::RepeatOne {
+                painter.text(
+                    center,
+                    egui::Align2::CENTER_CENTER,
+                    "1",
+                    FontId::proportional((size * 0.5).max(8.0)),
+                    color,
+                );
+            }
+        }
+        IconKind::Shuffle => {
+            let w = s * 0.78;
+            let h = s * 0.52;
+            let arr = s * 0.26;
+            // Bottom-left to top-right
+            painter.add(Shape::line(
+                vec![
+                    Pos2::new(center.x - w, center.y + h),
+                    Pos2::new(center.x - w * 0.25, center.y + h),
+                    Pos2::new(center.x + w * 0.25, center.y - h),
+                    Pos2::new(center.x + w, center.y - h),
+                ],
+                stroke,
+            ));
+            // Top-left to bottom-right
+            painter.add(Shape::line(
+                vec![
+                    Pos2::new(center.x - w, center.y - h),
+                    Pos2::new(center.x - w * 0.25, center.y - h),
+                    Pos2::new(center.x + w * 0.25, center.y + h),
+                    Pos2::new(center.x + w, center.y + h),
+                ],
+                stroke,
+            ));
+            // Arrowheads on right
+            painter.add(Shape::line(
+                vec![
+                    Pos2::new(center.x + w - arr, center.y - h - arr),
+                    Pos2::new(center.x + w, center.y - h),
+                    Pos2::new(center.x + w - arr, center.y - h + arr),
+                ],
+                stroke,
+            ));
+            painter.add(Shape::line(
+                vec![
+                    Pos2::new(center.x + w - arr, center.y + h - arr),
+                    Pos2::new(center.x + w, center.y + h),
+                    Pos2::new(center.x + w - arr, center.y + h + arr),
+                ],
+                stroke,
+            ));
+        }
+        IconKind::Queue => {
+            let w = s * 0.76;
+            let dy = s * 0.48;
+            painter.line_segment(
+                [Pos2::new(center.x - w, center.y - dy), Pos2::new(center.x + w, center.y - dy)],
+                stroke,
+            );
+            painter.line_segment(
+                [Pos2::new(center.x - w, center.y), Pos2::new(center.x + w, center.y)],
+                stroke,
+            );
+            painter.line_segment(
+                [
+                    Pos2::new(center.x - w, center.y + dy),
+                    Pos2::new(center.x + w * 0.45, center.y + dy),
+                ],
+                stroke,
+            );
+        }
+        IconKind::Pip => {
+            let outer = Rect::from_center_size(center, Vec2::new(s * 1.75, s * 1.32));
+            painter.rect_stroke(outer, CornerRadius::same(2), stroke, StrokeKind::Middle);
+            let inner = Rect::from_min_max(
+                Pos2::new(center.x + s * 0.05, center.y + s * 0.02),
+                Pos2::new(outer.right() - s * 0.22, outer.bottom() - s * 0.20),
+            );
+            painter.rect_filled(inner, CornerRadius::same(1), color);
+        }
+        IconKind::Volume | IconKind::VolumeMuted => {
+            let pts = vec![
+                Pos2::new(center.x - s * 0.75, center.y - s * 0.28),
+                Pos2::new(center.x - s * 0.35, center.y - s * 0.28),
+                Pos2::new(center.x + s * 0.08, center.y - s * 0.65),
+                Pos2::new(center.x + s * 0.08, center.y + s * 0.65),
+                Pos2::new(center.x - s * 0.35, center.y + s * 0.28),
+                Pos2::new(center.x - s * 0.75, center.y + s * 0.28),
+            ];
+            painter.add(Shape::convex_polygon(pts, color, Stroke::NONE));
+            if kind == IconKind::Volume {
+                let r1 = s * 0.38;
+                let r2 = s * 0.66;
+                for r in [r1, r2] {
+                    let pts: Vec<Pos2> = (-3..=3)
+                        .map(|k| {
+                            let a = (k as f32 / 3.0) * 0.72;
+                            Pos2::new(center.x + s * 0.14 + a.cos() * r, center.y + a.sin() * r)
+                        })
+                        .collect();
+                    painter.add(Shape::line(pts, stroke));
+                }
+            } else {
+                painter.line_segment(
+                    [
+                        Pos2::new(center.x + s * 0.28, center.y - s * 0.32),
+                        Pos2::new(center.x + s * 0.80, center.y + s * 0.32),
+                    ],
+                    stroke,
+                );
+                painter.line_segment(
+                    [
+                        Pos2::new(center.x + s * 0.80, center.y - s * 0.32),
+                        Pos2::new(center.x + s * 0.28, center.y + s * 0.32),
+                    ],
+                    stroke,
+                );
+            }
+        }
+    }
+}
+
+fn studio_slider(
+    ui: &mut Ui,
+    id_salt: impl std::hash::Hash + std::fmt::Debug,
+    value: &mut f64,
+    range: std::ops::RangeInclusive<f64>,
+    width: f32,
+    accent: Color32,
+) -> egui::Response {
+    let height = 18.0;
+    let (rect, mut response) =
+        ui.allocate_exact_size(Vec2::new(width.max(40.0), height), Sense::click_and_drag());
+
+    if response.hovered() || response.dragged() {
+        ui.ctx().set_cursor_icon(CursorIcon::PointingHand);
+    }
+
+    let min_v = *range.start();
+    let max_v = *range.end();
+    let span = (max_v - min_v).max(1e-6);
+
+    if response.dragged() || response.clicked() {
+        if let Some(pos) = response.interact_pointer_pos() {
+            let t = ((pos.x - rect.left()) / rect.width().max(1.0)).clamp(0.0, 1.0) as f64;
+            let new_val = min_v + t * span;
+            if (new_val - *value).abs() > 1e-6 {
+                *value = new_val;
+                response.mark_changed();
+            }
+        }
+    }
+
+    let t = ((*value - min_v) / span).clamp(0.0, 1.0) as f32;
+    let id = ui.make_persistent_id(id_salt);
+    let active_t = ui.ctx().animate_bool_with_time(
+        id.with("slider_act"),
+        response.hovered() || response.dragged(),
+        0.12,
+    );
+
+    let track_h = 4.0 + active_t * 1.5;
+    let track_rect = Rect::from_center_size(rect.center(), Vec2::new(rect.width(), track_h));
+    let track_r = CornerRadius::same((track_h * 0.5).ceil() as u8);
+
+    let painter = ui.painter();
+    painter.rect_filled(track_rect, track_r, Color32::from_rgb(44, 44, 54));
+
+    let fill_w = (track_rect.width() * t).max(0.0);
+    if fill_w > 0.5 {
+        let fill_rect =
+            Rect::from_min_size(track_rect.min, Vec2::new(fill_w, track_rect.height()));
+        painter.rect_filled(fill_rect, track_r, accent);
+    }
+
+    let knob_x = track_rect.left() + fill_w;
+    let knob_r = 4.5 + active_t * 2.0;
+    let knob_c = Pos2::new(knob_x, track_rect.center().y);
+    if active_t > 0.05 {
+        painter.circle_filled(
+            knob_c,
+            knob_r + 3.0,
+            Color32::from_rgba_unmultiplied(accent.r(), accent.g(), accent.b(), (55.0 * active_t) as u8),
+        );
+    }
+    painter.circle_filled(knob_c, knob_r, TEXT_MAIN);
+    painter.circle_stroke(knob_c, knob_r, Stroke::new(1.5, accent));
+
+    response
+}
+
+fn paint_glisse_chrome(
+    ui: &mut Ui,
+    id_salt: impl std::hash::Hash + std::fmt::Debug,
+    size: Vec2,
+    variant: GlisseVariant,
+) -> (Rect, Color32, egui::Response) {
+    let id = ui.make_persistent_id(id_salt);
+    let (rect, response) = ui.allocate_exact_size(size, Sense::click());
+
+    if !ui.is_rect_visible(rect) {
+        return (rect, TEXT_MAIN, response);
+    }
+
+    if response.hovered() {
+        ui.ctx().set_cursor_icon(CursorIcon::PointingHand);
+    }
+
+    let target_press = if response.is_pointer_button_down_on() {
+        1.0f32
+    } else {
+        0.0f32
+    };
+    let press_t = ui
+        .ctx()
+        .animate_value_with_time(id.with("press"), target_press, 0.11);
+    let hover_t = ui
+        .ctx()
+        .animate_bool_with_time(id.with("hover"), response.hovered(), 0.14);
+
+    let grow_px = 3.0 * press_t;
+    let draw_rect = rect.expand(grow_px * 0.5);
+    let radius = CornerRadius::same((draw_rect.height() * 0.5).round().min(255.0) as u8);
+
+    let (fill, fg, edge_stroke) = match variant {
+        GlisseVariant::Glass => {
+            let bg = lerp_color(GLASS_BASE, GLASS_HOVER, (hover_t * 0.75 + press_t * 0.5).min(1.0));
+            let text_col = lerp_color(TEXT_MUTED, TEXT_MAIN, hover_t);
+            let edge = lerp_color(
+                GLASS_EDGE,
+                Color32::from_rgba_unmultiplied(255, 255, 255, 42),
+                hover_t,
+            );
+            (bg, text_col, Stroke::new(1.0, edge))
+        }
+        GlisseVariant::Filled(tint) => {
+            let [tr, tg, tb, _] = tint.to_srgba_unmultiplied();
+            let bright = Color32::from_rgb(
+                tr.saturating_add(20),
+                tg.saturating_add(20),
+                tb.saturating_add(14),
+            );
+            let dark = Color32::from_rgb(
+                (tr as u16 * 85 / 100) as u8,
+                (tg as u16 * 85 / 100) as u8,
+                (tb as u16 * 85 / 100) as u8,
+            );
+            let bg = if press_t > 0.1 {
+                lerp_color(tint, dark, press_t)
+            } else {
+                lerp_color(tint, bright, hover_t)
+            };
+            let fg_col = if tint == ACCENT_BRASS || tint == ACCENT_GOLD {
+                BG_STUDIO
+            } else {
+                TEXT_MAIN
+            };
+            (
+                bg,
+                fg_col,
+                Stroke::new(1.0, Color32::from_rgba_unmultiplied(255, 255, 255, 36)),
+            )
+        }
+        GlisseVariant::ActiveTint(tint) => {
+            let [tr, tg, tb, _] = tint.to_srgba_unmultiplied();
+            let base = Color32::from_rgba_unmultiplied(tr, tg, tb, 52);
+            let hov = Color32::from_rgba_unmultiplied(tr, tg, tb, 82);
+            let bg = lerp_color(base, hov, hover_t);
+            let border = Color32::from_rgba_unmultiplied(tr, tg, tb, 130);
+            (bg, tint, Stroke::new(1.0, border))
+        }
+    };
+
+    let painter = ui.painter();
+    let shadow_rect = draw_rect.translate(Vec2::new(0.0, 1.5));
+    painter.rect_filled(
+        shadow_rect,
+        radius,
+        Color32::from_rgba_unmultiplied(0, 0, 0, 64),
+    );
+    painter.rect_filled(draw_rect, radius, fill);
+    painter.rect_stroke(draw_rect, radius, edge_stroke, StrokeKind::Inside);
+
+    let inner_rim = draw_rect.shrink(1.0);
+    if inner_rim.width() > 4.0 && inner_rim.height() > 4.0 {
+        let rim_radius = CornerRadius::same((inner_rim.height() * 0.5).round().min(255.0) as u8);
+        painter.rect_stroke(
+            inner_rim,
+            rim_radius,
+            Stroke::new(0.6, GLASS_RIM_LIGHT),
+            StrokeKind::Inside,
+        );
+    }
+
+    (draw_rect, fg, response)
+}
 
 // ============================================================================
 // Glisse Liquid Glass Button (Spring Physics + Bezel Rim Highlight)
@@ -51,123 +536,44 @@ pub fn glisse_button(
     size: Vec2,
     variant: GlisseVariant,
 ) -> egui::Response {
-    let id = ui.make_persistent_id(id_salt);
-    let (rect, response) = ui.allocate_exact_size(size, Sense::click());
-
-    if !ui.is_rect_visible(rect) {
-        return response;
-    }
-
-    if response.hovered() {
-        ui.ctx().set_cursor_icon(CursorIcon::PointingHand);
-    }
-
-    // Spring-like animated press expansion (iOS 26 / Glisse feel)
-    let target_press = if response.is_pointer_button_down_on() {
-        1.0f32
-    } else {
-        0.0f32
-    };
-    let press_t = ui
-        .ctx()
-        .animate_value_with_time(id.with("press"), target_press, 0.11);
-    let hover_t = ui.ctx().animate_bool_with_time(id.with("hover"), response.hovered(), 0.14);
-
-    let grow_px = 4.0 * press_t;
-    let draw_rect = rect.expand(grow_px * 0.5);
-    let radius = CornerRadius::same((draw_rect.height() * 0.5).round().min(255.0) as u8);
-
-    let (fill, fg, edge_stroke) = match variant {
-        GlisseVariant::Glass => {
-            let bg = lerp_color(GLASS_BASE, GLASS_HOVER, (hover_t * 0.7 + press_t * 0.6).min(1.0));
-            let text_col = lerp_color(TEXT_MUTED, TEXT_MAIN, hover_t);
-            (bg, text_col, Stroke::new(1.0, GLASS_EDGE))
-        }
-        GlisseVariant::Filled(tint) => {
-            let bright = Color32::from_rgb(
-                tint.r().saturating_add(22),
-                tint.g().saturating_add(22),
-                tint.b().saturating_add(16),
-            );
-            let dark = Color32::from_rgb(
-                (tint.r() as u16 * 85 / 100) as u8,
-                (tint.g() as u16 * 85 / 100) as u8,
-                (tint.b() as u16 * 85 / 100) as u8,
-            );
-            let bg = if press_t > 0.1 {
-                lerp_color(tint, dark, press_t)
-            } else {
-                lerp_color(tint, bright, hover_t)
-            };
-            let fg_col = if tint == ACCENT_BRASS || tint == ACCENT_GOLD {
-                BG_STUDIO
-            } else {
-                TEXT_MAIN
-            };
-            (
-                bg,
-                fg_col,
-                Stroke::new(1.0, Color32::from_rgba_unmultiplied(255, 255, 255, 55)),
-            )
-        }
-        GlisseVariant::ActiveTint(tint) => {
-            let base = Color32::from_rgba_unmultiplied(tint.r(), tint.g(), tint.b(), 64);
-            let hov = Color32::from_rgba_unmultiplied(tint.r(), tint.g(), tint.b(), 92);
-            let bg = lerp_color(base, hov, hover_t);
-            let border = Color32::from_rgba_unmultiplied(tint.r(), tint.g(), tint.b(), 140);
-            (bg, TEXT_MAIN, Stroke::new(1.0, border))
-        }
-    };
-
-    let painter = ui.painter();
-    // Subtle drop shadow
-    let shadow_rect = draw_rect.translate(Vec2::new(0.0, 1.5));
-    painter.rect_filled(
-        shadow_rect,
-        radius,
-        Color32::from_rgba_unmultiplied(0, 0, 0, 75),
-    );
-    // Glass body
-    painter.rect_filled(draw_rect, radius, fill);
-    // Outer glass edge
-    painter.rect_stroke(draw_rect, radius, edge_stroke, StrokeKind::Inside);
-    // Specular top-left Liquid Glass rim highlight
-    let inner_rim = draw_rect.shrink(1.0);
-    if inner_rim.width() > 2.0 && inner_rim.height() > 2.0 {
-        let rim_radius = CornerRadius::same((inner_rim.height() * 0.5).round().min(255.0) as u8);
-        painter.rect_stroke(
-            inner_rim,
-            rim_radius,
-            Stroke::new(0.75, GLASS_RIM_LIGHT),
-            StrokeKind::Inside,
+    let (draw_rect, fg, response) = paint_glisse_chrome(ui, id_salt, size, variant);
+    if ui.is_rect_visible(draw_rect) {
+        ui.painter().text(
+            draw_rect.center(),
+            egui::Align2::CENTER_CENTER,
+            label,
+            FontId::proportional(12.0),
+            fg,
         );
     }
+    response
+}
 
-    // Label / Glyph
-    let font_size = if size.x <= 36.0 && label.chars().count() <= 2 {
-        14.0
-    } else {
-        12.0
-    };
-    painter.text(
-        draw_rect.center(),
-        egui::Align2::CENTER_CENTER,
-        label,
-        FontId::proportional(font_size),
-        fg,
-    );
-
+pub fn glisse_icon_button(
+    ui: &mut Ui,
+    id_salt: impl std::hash::Hash + std::fmt::Debug,
+    icon: IconKind,
+    size: Vec2,
+    variant: GlisseVariant,
+) -> egui::Response {
+    let (draw_rect, fg, response) = paint_glisse_chrome(ui, id_salt, size, variant);
+    if ui.is_rect_visible(draw_rect) {
+        let icon_sz = (size.x.min(size.y) * 0.44).clamp(11.0, 18.0);
+        paint_icon(ui, ui.painter(), draw_rect.center(), icon_sz, icon, fg);
+    }
     response
 }
 
 fn lerp_color(a: Color32, b: Color32, t: f32) -> Color32 {
     let t = t.clamp(0.0, 1.0);
     let inv = 1.0 - t;
+    let [ar, ag, ab, aa] = a.to_srgba_unmultiplied();
+    let [br, bg, bb, ba] = b.to_srgba_unmultiplied();
     Color32::from_rgba_unmultiplied(
-        (a.r() as f32 * inv + b.r() as f32 * t).round() as u8,
-        (a.g() as f32 * inv + b.g() as f32 * t).round() as u8,
-        (a.b() as f32 * inv + b.b() as f32 * t).round() as u8,
-        (a.a() as f32 * inv + b.a() as f32 * t).round() as u8,
+        (ar as f32 * inv + br as f32 * t).round() as u8,
+        (ag as f32 * inv + bg as f32 * t).round() as u8,
+        (ab as f32 * inv + bb as f32 * t).round() as u8,
+        (aa as f32 * inv + ba as f32 * t).round() as u8,
     )
 }
 
@@ -986,25 +1392,27 @@ impl NadaApp {
                             }
 
                             if !self.search_query.is_empty()
-                                && glisse_button(
+                                && glisse_icon_button(
                                     ui,
                                     "clear_search",
-                                    "×",
+                                    IconKind::Clear,
                                     Vec2::new(26.0, 26.0),
                                     GlisseVariant::Glass,
                                 )
+                                .on_hover_text("Hapus pencarian")
                                 .clicked()
                             {
                                 self.search_query.clear();
                             }
 
-                            if glisse_button(
+                            if glisse_icon_button(
                                 ui,
                                 "search_btn",
-                                "⌕",
+                                IconKind::Search,
                                 Vec2::new(28.0, 28.0),
                                 GlisseVariant::Glass,
                             )
+                            .on_hover_text("Cari")
                             .clicked()
                             {
                                 self.trigger_search(ctx.clone());
@@ -1104,10 +1512,10 @@ impl NadaApp {
         } else {
             GlisseVariant::Glass
         };
-        if glisse_button(
+        if glisse_icon_button(
             &mut child,
             "stage_pip_btn",
-            "⧉",
+            IconKind::Pip,
             Vec2::new(32.0, 32.0),
             pip_variant,
         )
@@ -1185,8 +1593,12 @@ impl NadaApp {
                         );
                         let mut child = ui.new_child(egui::UiBuilder::new().max_rect(ctrl_rect));
                         child.horizontal(|ui| {
-                            let icon = if is_playing { "⏸" } else { "▶" };
-                            if glisse_button(
+                            let icon = if is_playing {
+                                IconKind::Pause
+                            } else {
+                                IconKind::Play
+                            };
+                            if glisse_icon_button(
                                 ui,
                                 "pip_play_toggle",
                                 icon,
@@ -1197,10 +1609,10 @@ impl NadaApp {
                             {
                                 toggle_cl.store(true, Ordering::Release);
                             }
-                            if glisse_button(
+                            if glisse_icon_button(
                                 ui,
                                 "pip_exit_btn",
-                                "✕",
+                                IconKind::Clear,
                                 Vec2::new(36.0, 36.0),
                                 GlisseVariant::Glass,
                             )
@@ -1241,13 +1653,15 @@ impl NadaApp {
                             .color(TEXT_DIMMED),
                     );
                     let slider_w = (ui.available_width() - 46.0).max(80.0);
-                    ui.spacing_mut().slider_width = slider_w;
                     let mut slider_pos = cur;
                     let max_r = if dur > 0.5 { dur } else { 1.0 };
-                    let s_resp = ui.add(
-                        egui::Slider::new(&mut slider_pos, 0.0..=max_r)
-                            .show_value(false)
-                            .trailing_fill(true),
+                    let s_resp = studio_slider(
+                        ui,
+                        "progress_slider",
+                        &mut slider_pos,
+                        0.0..=max_r,
+                        slider_w,
+                        ACCENT_BRASS,
                     );
                     if s_resp.dragged() || s_resp.changed() {
                         self.seeking_val = Some(slider_pos);
@@ -1279,12 +1693,7 @@ impl NadaApp {
                             ui.allocate_exact_size(Vec2::new(44.0, 44.0), Sense::hover());
                         if let Some(url) = &t.cover {
                             if let Some(tex) = self.covers.get(url) {
-                                ui.painter().image(
-                                    tex.id(),
-                                    cov_rect,
-                                    Rect::from_min_max(Pos2::ZERO, Pos2::new(1.0, 1.0)),
-                                    Color32::WHITE,
-                                );
+                                paint_rounded_image(ui.painter(), cov_rect, tex.id(), 8);
                             } else {
                                 ui.painter().rect_filled(
                                     cov_rect,
@@ -1298,7 +1707,7 @@ impl NadaApp {
                         }
                     }
 
-                    let meta_w = (ui.available_width() - 126.0).max(80.0);
+                    let meta_w = (ui.available_width() - 128.0).max(80.0);
                     ui.allocate_ui_with_layout(
                         Vec2::new(meta_w, 44.0),
                         Layout::top_down(Align::Min),
@@ -1352,10 +1761,10 @@ impl NadaApp {
 
                     ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
                         ui.spacing_mut().item_spacing.x = 6.0;
-                        if glisse_button(
+                        if glisse_icon_button(
                             ui,
                             "next_btn",
-                            "⏭",
+                            IconKind::Next,
                             Vec2::new(34.0, 34.0),
                             GlisseVariant::Glass,
                         )
@@ -1365,17 +1774,17 @@ impl NadaApp {
                             self.next_track(false, &ctx);
                         }
 
-                        let play_label = if snap.loading {
-                            "…"
+                        let play_icon = if snap.loading {
+                            IconKind::Loading
                         } else if snap.playing {
-                            "⏸"
+                            IconKind::Pause
                         } else {
-                            "▶"
+                            IconKind::Play
                         };
-                        if glisse_button(
+                        if glisse_icon_button(
                             ui,
                             "play_btn",
-                            play_label,
+                            play_icon,
                             Vec2::new(40.0, 40.0),
                             GlisseVariant::Filled(ACCENT_BRASS),
                         )
@@ -1385,10 +1794,10 @@ impl NadaApp {
                             self.toggle_play(snap, &ctx);
                         }
 
-                        if glisse_button(
+                        if glisse_icon_button(
                             ui,
                             "prev_btn",
-                            "⏮",
+                            IconKind::Prev,
                             Vec2::new(34.0, 34.0),
                             GlisseVariant::Glass,
                         )
@@ -1409,13 +1818,19 @@ impl NadaApp {
                     } else {
                         GlisseVariant::Glass
                     };
-                    let rep_label = match self.repeat {
-                        RepeatMode::One => "🔁1",
-                        _ => "🔁",
+                    let rep_icon = match self.repeat {
+                        RepeatMode::One => IconKind::RepeatOne,
+                        _ => IconKind::Repeat,
                     };
-                    if glisse_button(ui, "repeat_btn", rep_label, Vec2::new(34.0, 28.0), rep_variant)
-                        .on_hover_text("Ulangi (R)")
-                        .clicked()
+                    if glisse_icon_button(
+                        ui,
+                        "repeat_btn",
+                        rep_icon,
+                        Vec2::new(32.0, 28.0),
+                        rep_variant,
+                    )
+                    .on_hover_text("Ulangi (R)")
+                    .clicked()
                     {
                         self.toggle_repeat();
                     }
@@ -1425,9 +1840,15 @@ impl NadaApp {
                     } else {
                         GlisseVariant::Glass
                     };
-                    if glisse_button(ui, "shuffle_btn", "🔀", Vec2::new(32.0, 28.0), shuf_variant)
-                        .on_hover_text("Acak antrean (S)")
-                        .clicked()
+                    if glisse_icon_button(
+                        ui,
+                        "shuffle_btn",
+                        IconKind::Shuffle,
+                        Vec2::new(32.0, 28.0),
+                        shuf_variant,
+                    )
+                    .on_hover_text("Acak antrean (S)")
+                    .clicked()
                     {
                         self.toggle_shuffle();
                     }
@@ -1438,22 +1859,54 @@ impl NadaApp {
                         } else {
                             GlisseVariant::Glass
                         };
-                        if glisse_button(ui, "queue_btn", "☰", Vec2::new(32.0, 28.0), q_variant)
-                            .on_hover_text("Antrean")
-                            .clicked()
+                        if glisse_icon_button(
+                            ui,
+                            "queue_btn",
+                            IconKind::Queue,
+                            Vec2::new(32.0, 28.0),
+                            q_variant,
+                        )
+                        .on_hover_text("Antrean")
+                        .clicked()
                         {
                             self.queue_open = !self.queue_open;
                         }
 
-                        ui.spacing_mut().slider_width = 76.0;
-                        if ui
-                            .add(
-                                egui::Slider::new(&mut self.volume, 0.0..=1.0)
-                                    .show_value(false)
-                                    .trailing_fill(true),
-                            )
-                            .changed()
+                        let mut vol_f64 = self.volume as f64;
+                        if studio_slider(
+                            ui,
+                            "volume_slider",
+                            &mut vol_f64,
+                            0.0..=1.0,
+                            72.0,
+                            ACCENT_BRASS,
+                        )
+                        .changed()
                         {
+                            self.volume = vol_f64 as f32;
+                            self.media.set_volume(self.volume);
+                        }
+
+                        let vol_icon = if self.volume <= 0.001 {
+                            IconKind::VolumeMuted
+                        } else {
+                            IconKind::Volume
+                        };
+                        if glisse_icon_button(
+                            ui,
+                            "mute_btn",
+                            vol_icon,
+                            Vec2::new(26.0, 26.0),
+                            GlisseVariant::Glass,
+                        )
+                        .on_hover_text(if self.volume <= 0.001 { "Unmute" } else { "Mute" })
+                        .clicked()
+                        {
+                            if self.volume <= 0.001 {
+                                self.volume = 0.8;
+                            } else {
+                                self.volume = 0.0;
+                            }
                             self.media.set_volume(self.volume);
                         }
 
@@ -1593,16 +2046,21 @@ impl NadaApp {
                                     ui.ctx().set_cursor_icon(CursorIcon::PointingHand);
                                 }
                                 let bg = if resp.hovered() {
-                                    Color32::from_rgb(42, 42, 52)
+                                    Color32::from_rgb(42, 42, 54)
                                 } else {
                                     SURFACE_CARD
                                 };
+                                let border = if resp.hovered() {
+                                    Color32::from_rgba_unmultiplied(245, 158, 11, 110)
+                                } else {
+                                    BORDER_SUBTLE
+                                };
                                 let painter = ui.painter();
-                                painter.rect_filled(card_rect, CornerRadius::same(10), bg);
+                                painter.rect_filled(card_rect, CornerRadius::same(12), bg);
                                 painter.rect_stroke(
                                     card_rect,
-                                    CornerRadius::same(10),
-                                    Stroke::new(1.0, BORDER_SUBTLE),
+                                    CornerRadius::same(12),
+                                    Stroke::new(1.0, border),
                                     StrokeKind::Inside,
                                 );
 
@@ -1612,33 +2070,48 @@ impl NadaApp {
                                 );
                                 if let Some(url) = &item.cover {
                                     if let Some(tex) = self.covers.get(url) {
-                                        painter.image(
-                                            tex.id(),
-                                            img_rect,
-                                            Rect::from_min_max(Pos2::ZERO, Pos2::new(1.0, 1.0)),
-                                            Color32::WHITE,
-                                        );
+                                        paint_rounded_image(painter, img_rect, tex.id(), 8);
                                     } else {
                                         painter.rect_filled(
                                             img_rect,
-                                            CornerRadius::same(6),
+                                            CornerRadius::same(8),
                                             SURFACE_PANEL,
                                         );
                                     }
                                 } else {
                                     painter.rect_filled(
                                         img_rect,
-                                        CornerRadius::same(6),
+                                        CornerRadius::same(8),
                                         SURFACE_PANEL,
                                     );
+                                }
+
+                                // Hover play affordance on card cover
+                                if resp.hovered() {
+                                    painter.rect_filled(
+                                        img_rect,
+                                        CornerRadius::same(8),
+                                        Color32::from_rgba_unmultiplied(0, 0, 0, 72),
+                                    );
+                                    let badge_c = Pos2::new(
+                                        img_rect.right() - 18.0,
+                                        img_rect.bottom() - 18.0,
+                                    );
+                                    painter.circle_filled(badge_c, 13.0, ACCENT_BRASS);
+                                    paint_icon(ui, painter, badge_c, 12.0, IconKind::Play, BG_STUDIO);
                                 }
 
                                 let text_rect = Rect::from_min_max(
                                     Pos2::new(card_rect.left() + 8.0, img_rect.bottom() + 6.0),
                                     Pos2::new(card_rect.right() - 8.0, card_rect.bottom() - 6.0),
                                 );
-                                let mut text_ui =
-                                    ui.new_child(egui::UiBuilder::new().max_rect(text_rect));
+                                let mut text_ui = ui.new_child(
+                                    egui::UiBuilder::new()
+                                        .max_rect(text_rect)
+                                        .layout(Layout::top_down(Align::Min)),
+                                );
+                                text_ui.set_clip_rect(text_rect);
+                                text_ui.spacing_mut().item_spacing.y = 1.0;
                                 text_ui.add(
                                     egui::Label::new(
                                         RichText::new(&item.name)
@@ -1655,7 +2128,7 @@ impl NadaApp {
                                 };
                                 text_ui.add(
                                     egui::Label::new(
-                                        RichText::new(sub).size(11.0).color(TEXT_MUTED),
+                                        RichText::new(sub).size(10.5).color(TEXT_MUTED),
                                     )
                                     .truncate(),
                                 );
@@ -1776,12 +2249,7 @@ impl NadaApp {
                 Rect::from_min_size(Pos2::new(rect.left() + 8.0, rect.top() + 7.0), Vec2::splat(42.0));
             if let Some(url) = &track.cover {
                 if let Some(tex) = self.covers.get(url) {
-                    painter.image(
-                        tex.id(),
-                        cov_rect,
-                        Rect::from_min_max(Pos2::ZERO, Pos2::new(1.0, 1.0)),
-                        Color32::WHITE,
-                    );
+                    paint_rounded_image(painter, cov_rect, tex.id(), 6);
                 } else {
                     painter.rect_filled(cov_rect, CornerRadius::same(6), SURFACE_CARD);
                 }
@@ -1802,7 +2270,12 @@ impl NadaApp {
                 Pos2::new(cov_rect.right() + 10.0, rect.top() + 9.0),
                 Pos2::new(rect.right() - 52.0, rect.bottom() - 7.0),
             );
-            let mut text_ui = ui.new_child(egui::UiBuilder::new().max_rect(text_rect));
+            let mut text_ui = ui.new_child(
+                egui::UiBuilder::new()
+                    .max_rect(text_rect)
+                    .layout(Layout::top_down(Align::Min)),
+            );
+            text_ui.set_clip_rect(text_rect);
             let title_col = if is_playing { ACCENT_GOLD } else { TEXT_MAIN };
             text_ui.add(
                 egui::Label::new(RichText::new(&track.name).strong().size(13.0).color(title_col))
@@ -1853,13 +2326,14 @@ impl NadaApp {
                         ui.horizontal(|ui| {
                             ui.label(RichText::new("Antrean").strong().size(14.0).color(TEXT_MAIN));
                             ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
-                                if glisse_button(
+                                if glisse_icon_button(
                                     ui,
                                     "queue_close_btn",
-                                    "✕",
+                                    IconKind::Clear,
                                     Vec2::new(28.0, 28.0),
                                     GlisseVariant::Glass,
                                 )
+                                .on_hover_text("Tutup antrean")
                                 .clicked()
                                 {
                                     self.queue_open = false;
@@ -1893,9 +2367,13 @@ impl NadaApp {
                                         };
                                         ui.painter().rect_filled(r, CornerRadius::same(8), c);
                                     }
+                                    let row_rect = r.shrink2(Vec2::new(8.0, 4.0));
                                     let mut row_ui = ui.new_child(
-                                        egui::UiBuilder::new().max_rect(r.shrink2(Vec2::new(8.0, 4.0))),
+                                        egui::UiBuilder::new()
+                                            .max_rect(row_rect)
+                                            .layout(Layout::top_down(Align::Min)),
                                     );
+                                    row_ui.set_clip_rect(row_rect);
                                     row_ui.add(
                                         egui::Label::new(
                                             RichText::new(&t.name)

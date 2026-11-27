@@ -32,12 +32,6 @@ jobs:
       - name: Checkout repository
         uses: actions/checkout@v7
 
-      - name: Setup Node.js
-        uses: actions/setup-node@v6
-        with:
-          node-version: 24
-          cache: 'npm'
-
       - name: Setup Rust toolchain
         uses: dtolnay/rust-toolchain@stable
 
@@ -46,13 +40,7 @@ jobs:
         with:
           workspaces: './src-tauri'
 
-      - name: Install npm dependencies
-        run: npm ci
-
-      - name: Run JavaScript unit tests
-        run: npm test
-
-      - name: Run Rust backend tests
+      - name: Run Rust tests
         run: cargo test --manifest-path src-tauri/Cargo.toml
 
       - name: Prepare Windows Code Signing Certificate
@@ -89,38 +77,21 @@ jobs:
             Export-Certificate -Cert $cert -FilePath "certificates/Nada-PublicCert.cer" | Out-Null
           }
 
-      - name: Build Tauri Release & NSIS Installer
+      - name: Build Pure Rust Desktop Release Binary
         env:
           NADA_JNN_KEY: ${{ secrets.NADA_JNN_KEY }}
-        run: npm run build
+        run: cargo build --release --manifest-path src-tauri/Cargo.toml
 
-      - name: Sign Binaries and Installer with SignTool
+      - name: Resolve Version & Build NSIS Installer
         shell: pwsh
         run: |
-          $signtool = (Get-ChildItem -Path "C:\Program Files (x86)\Windows Kits\10\bin\*\x64\signtool.exe" | Select-Object -Last 1).FullName
-          Write-Host "Using SignTool: $signtool"
-          $thumbprint = $env:CERT_THUMBPRINT
-
-          $targets = @()
-          $exe = "src-tauri/target/release/nada.exe"
-          if (Test-Path $exe) { $targets += $exe }
-
-          $nsis = Get-ChildItem -Path "src-tauri/target/release/bundle/nsis/*.exe" -ErrorAction SilentlyContinue
-          if ($nsis) { $targets += $nsis.FullName }
-
-          foreach ($target in $targets) {
-            Write-Host "Signing $target with timestamp..."
-            & $signtool sign /sha1 $thumbprint /fd SHA256 /tr http://timestamp.digicert.com /td SHA256 /d "Nada Desktop Player" $target
-            if ($LASTEXITCODE -ne 0) {
-              throw "SignTool failed on $target with exit code $LASTEXITCODE"
-            }
-            Get-AuthenticodeSignature -FilePath $target | Format-List
+          $cargoToml = Get-Content src-tauri/Cargo.toml -Raw
+          if ($cargoToml -match '(?m)^version\s*=\s*"([^"]+)"') {
+            $confVersion = $Matches[1]
+          } else {
+            throw "Failed to parse version from src-tauri/Cargo.toml"
           }
 
-      - name: Package Signed Assets & Generate Checksums
-        shell: pwsh
-        run: |
-          $confVersion = (Get-Content src-tauri/tauri.conf.json | ConvertFrom-Json).version
           if ("${{ github.ref_type }}" -eq "tag" -and "${{ github.ref_name }}".StartsWith("v")) {
             $tagName = "${{ github.ref_name }}"
             $version = $tagName.TrimStart("v")
@@ -133,13 +104,45 @@ jobs:
 
           New-Item -ItemType Directory -Force -Path "release-extra"
 
-          # 1. Copy signed NSIS installer
-          $nsis = Get-ChildItem -Path "src-tauri/target/release/bundle/nsis/*.exe" -ErrorAction SilentlyContinue | Select-Object -First 1
-          if ($nsis) {
-            Copy-Item $nsis.FullName "release-extra/$($nsis.Name)"
+          # Sign standalone nada.exe BEFORE embedding into NSIS installer so installed binary is signed too
+          $signtool = (Get-ChildItem -Path "C:\Program Files (x86)\Windows Kits\10\bin\*\x64\signtool.exe" | Select-Object -Last 1).FullName
+          $thumbprint = $env:CERT_THUMBPRINT
+          $exe = (Resolve-Path "src-tauri/target/release/nada.exe").Path
+          Write-Host "Signing $exe with timestamp..."
+          & $signtool sign /sha1 $thumbprint /fd SHA256 /tr http://timestamp.digicert.com /td SHA256 /d "Nada Desktop Player" $exe
+          if ($LASTEXITCODE -ne 0) {
+            throw "SignTool failed on $exe with exit code $LASTEXITCODE"
           }
 
-          # 2. Package signed standalone portable binary
+          $makensis = (Get-Command makensis.exe -ErrorAction SilentlyContinue)?.Source
+          if (-not $makensis) {
+            $makensis = "C:\Program Files (x86)\NSIS\makensis.exe"
+          }
+          if (-not (Test-Path $makensis)) {
+            choco install nsis -y
+            $makensis = "C:\Program Files (x86)\NSIS\makensis.exe"
+          }
+
+          $iconPath = (Resolve-Path "src-tauri/icons/icon.ico").Path
+          $outSetup = Join-Path (Resolve-Path "release-extra").Path "Nada_${version}_x64-setup.exe"
+          & $makensis "/DVERSION=$version" "/DEXE_PATH=$exe" "/DICON_PATH=$iconPath" "/DOUT_FILE=$outSetup" "scripts/installer.nsi"
+          if ($LASTEXITCODE -ne 0) {
+            throw "makensis failed with exit code $LASTEXITCODE"
+          }
+
+          Write-Host "Signing $outSetup with timestamp..."
+          & $signtool sign /sha1 $thumbprint /fd SHA256 /tr http://timestamp.digicert.com /td SHA256 /d "Nada Desktop Player Setup" $outSetup
+          if ($LASTEXITCODE -ne 0) {
+            throw "SignTool failed on $outSetup with exit code $LASTEXITCODE"
+          }
+          Get-AuthenticodeSignature -FilePath $outSetup | Format-List
+
+      - name: Package Signed Assets & Generate Checksums
+        shell: pwsh
+        run: |
+          $version = $env:RELEASE_VERSION
+
+          # 1. Package signed standalone portable binary
           $portableFolder = "release-extra/Nada-v$version-portable"
           New-Item -ItemType Directory -Force -Path $portableFolder
           Copy-Item "src-tauri/target/release/nada.exe" "$portableFolder/nada.exe"
@@ -152,17 +155,17 @@ jobs:
           Compress-Archive -Path "$portableFolder/*" -DestinationPath "release-extra/Nada-v$version-windows-portable.zip" -Force
           Remove-Item -Recurse -Force $portableFolder
 
-          # 3. Copy Public Certificate to release assets
+          # 2. Copy Public Certificate to release assets
           if (Test-Path "certificates/Nada-PublicCert.cer") {
             Copy-Item "certificates/Nada-PublicCert.cer" "release-extra/Nada-PublicCert.cer"
           }
 
-          # 4. Compute SHA256 checksums on signed artifacts
+          # 3. Compute SHA256 checksums on signed artifacts
           $checksumList = @()
+          $nsis = Get-ChildItem -Path "release-extra/*-setup.exe" -ErrorAction SilentlyContinue | Select-Object -First 1
           if ($nsis) {
-            $signedNsis = Get-Item "release-extra/$($nsis.Name)"
-            $hashNsis = (Get-FileHash -Path $signedNsis.FullName -Algorithm SHA256).Hash.ToLower()
-            $checksumList += "$hashNsis  $($signedNsis.Name)"
+            $hashNsis = (Get-FileHash -Path $nsis.FullName -Algorithm SHA256).Hash.ToLower()
+            $checksumList += "$hashNsis  $($nsis.Name)"
           }
 
           $portableZip = Get-Item "release-extra/Nada-v$version-windows-portable.zip"
@@ -183,7 +186,7 @@ jobs:
           body: |
             ### Nada ${{ env.RELEASE_TAG }}
 
-            Lightweight, ad-free desktop music and video player for Windows.
+            Pure-Rust ultra-lightweight desktop music and video player for Windows (zero WebView).
 
             #### Assets included:
             - **Installer (NSIS Setup, Signed)**: `Nada_${{ env.RELEASE_VERSION }}_x64-setup.exe`

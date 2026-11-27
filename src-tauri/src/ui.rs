@@ -1,0 +1,2056 @@
+use std::collections::{HashMap, HashSet};
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{mpsc, Arc};
+use std::time::{Duration, Instant};
+
+use egui::{
+    Align, Color32, ColorImage, CornerRadius, CursorIcon, FontId, Frame, Id, Key, Layout, Margin,
+    Order, PointerButton, Pos2, Rect, RichText, Sense, Shape, Stroke, StrokeKind, TextureHandle,
+    TextureOptions, Ui, Vec2, ViewportBuilder, ViewportCommand, ViewportId,
+};
+
+use crate::media::{MediaEngine, MediaSnapshot, PlayRequest, StreamInput};
+use crate::{Backend, HomeItem, StreamsResponse, Track};
+
+// ============================================================================
+// iLaras v2.0 + Glisse Liquid Glass Design Tokens
+// ============================================================================
+
+const BG_STUDIO: Color32 = Color32::from_rgb(17, 17, 16); // #111110
+const SURFACE_PANEL: Color32 = Color32::from_rgb(24, 24, 32); // #181820
+const SURFACE_CARD: Color32 = Color32::from_rgb(34, 34, 43); // #22222b
+const BORDER_SUBTLE: Color32 = Color32::from_rgb(50, 50, 62); // #32323e
+const TEXT_MAIN: Color32 = Color32::from_rgb(245, 245, 247); // #f5f5f7
+const TEXT_MUTED: Color32 = Color32::from_rgb(172, 172, 182); // #acacb6
+const TEXT_DIMMED: Color32 = Color32::from_rgb(148, 148, 158); // #94949e
+const ACCENT_BRASS: Color32 = Color32::from_rgb(217, 119, 6); // #d97706
+const ACCENT_GOLD: Color32 = Color32::from_rgb(245, 158, 11); // #f59e0b
+const GLASS_TERRACOTTA: Color32 = Color32::from_rgb(214, 90, 56); // #d65a38
+const STATUS_JADE: Color32 = Color32::from_rgb(16, 185, 129); // #10b981
+
+const GLASS_BASE: Color32 = Color32::from_rgba_premultiplied(36, 36, 42, 175);
+const GLASS_HOVER: Color32 = Color32::from_rgba_premultiplied(58, 58, 68, 205);
+const GLASS_EDGE: Color32 = Color32::from_rgba_premultiplied(255, 255, 255, 34);
+const GLASS_RIM_LIGHT: Color32 = Color32::from_rgba_premultiplied(255, 252, 245, 68);
+
+// ============================================================================
+// Glisse Liquid Glass Button (Spring Physics + Bezel Rim Highlight)
+// ============================================================================
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub enum GlisseVariant {
+    Glass,
+    Filled(Color32),
+    ActiveTint(Color32),
+}
+
+pub fn glisse_button(
+    ui: &mut Ui,
+    id_salt: impl std::hash::Hash + std::fmt::Debug,
+    label: &str,
+    size: Vec2,
+    variant: GlisseVariant,
+) -> egui::Response {
+    let id = ui.make_persistent_id(id_salt);
+    let (rect, response) = ui.allocate_exact_size(size, Sense::click());
+
+    if !ui.is_rect_visible(rect) {
+        return response;
+    }
+
+    if response.hovered() {
+        ui.ctx().set_cursor_icon(CursorIcon::PointingHand);
+    }
+
+    // Spring-like animated press expansion (iOS 26 / Glisse feel)
+    let target_press = if response.is_pointer_button_down_on() {
+        1.0f32
+    } else {
+        0.0f32
+    };
+    let press_t = ui
+        .ctx()
+        .animate_value_with_time(id.with("press"), target_press, 0.11);
+    let hover_t = ui.ctx().animate_bool_with_time(id.with("hover"), response.hovered(), 0.14);
+
+    let grow_px = 4.0 * press_t;
+    let draw_rect = rect.expand(grow_px * 0.5);
+    let radius = CornerRadius::same((draw_rect.height() * 0.5).round().min(255.0) as u8);
+
+    let (fill, fg, edge_stroke) = match variant {
+        GlisseVariant::Glass => {
+            let bg = lerp_color(GLASS_BASE, GLASS_HOVER, (hover_t * 0.7 + press_t * 0.6).min(1.0));
+            let text_col = lerp_color(TEXT_MUTED, TEXT_MAIN, hover_t);
+            (bg, text_col, Stroke::new(1.0, GLASS_EDGE))
+        }
+        GlisseVariant::Filled(tint) => {
+            let bright = Color32::from_rgb(
+                tint.r().saturating_add(22),
+                tint.g().saturating_add(22),
+                tint.b().saturating_add(16),
+            );
+            let dark = Color32::from_rgb(
+                (tint.r() as u16 * 85 / 100) as u8,
+                (tint.g() as u16 * 85 / 100) as u8,
+                (tint.b() as u16 * 85 / 100) as u8,
+            );
+            let bg = if press_t > 0.1 {
+                lerp_color(tint, dark, press_t)
+            } else {
+                lerp_color(tint, bright, hover_t)
+            };
+            let fg_col = if tint == ACCENT_BRASS || tint == ACCENT_GOLD {
+                BG_STUDIO
+            } else {
+                TEXT_MAIN
+            };
+            (
+                bg,
+                fg_col,
+                Stroke::new(1.0, Color32::from_rgba_unmultiplied(255, 255, 255, 55)),
+            )
+        }
+        GlisseVariant::ActiveTint(tint) => {
+            let base = Color32::from_rgba_unmultiplied(tint.r(), tint.g(), tint.b(), 64);
+            let hov = Color32::from_rgba_unmultiplied(tint.r(), tint.g(), tint.b(), 92);
+            let bg = lerp_color(base, hov, hover_t);
+            let border = Color32::from_rgba_unmultiplied(tint.r(), tint.g(), tint.b(), 140);
+            (bg, TEXT_MAIN, Stroke::new(1.0, border))
+        }
+    };
+
+    let painter = ui.painter();
+    // Subtle drop shadow
+    let shadow_rect = draw_rect.translate(Vec2::new(0.0, 1.5));
+    painter.rect_filled(
+        shadow_rect,
+        radius,
+        Color32::from_rgba_unmultiplied(0, 0, 0, 75),
+    );
+    // Glass body
+    painter.rect_filled(draw_rect, radius, fill);
+    // Outer glass edge
+    painter.rect_stroke(draw_rect, radius, edge_stroke, StrokeKind::Inside);
+    // Specular top-left Liquid Glass rim highlight
+    let inner_rim = draw_rect.shrink(1.0);
+    if inner_rim.width() > 2.0 && inner_rim.height() > 2.0 {
+        let rim_radius = CornerRadius::same((inner_rim.height() * 0.5).round().min(255.0) as u8);
+        painter.rect_stroke(
+            inner_rim,
+            rim_radius,
+            Stroke::new(0.75, GLASS_RIM_LIGHT),
+            StrokeKind::Inside,
+        );
+    }
+
+    // Label / Glyph
+    let font_size = if size.x <= 36.0 && label.chars().count() <= 2 {
+        14.0
+    } else {
+        12.0
+    };
+    painter.text(
+        draw_rect.center(),
+        egui::Align2::CENTER_CENTER,
+        label,
+        FontId::proportional(font_size),
+        fg,
+    );
+
+    response
+}
+
+fn lerp_color(a: Color32, b: Color32, t: f32) -> Color32 {
+    let t = t.clamp(0.0, 1.0);
+    let inv = 1.0 - t;
+    Color32::from_rgba_unmultiplied(
+        (a.r() as f32 * inv + b.r() as f32 * t).round() as u8,
+        (a.g() as f32 * inv + b.g() as f32 * t).round() as u8,
+        (a.b() as f32 * inv + b.b() as f32 * t).round() as u8,
+        (a.a() as f32 * inv + b.a() as f32 * t).round() as u8,
+    )
+}
+
+// ============================================================================
+// Application View & Playback State
+// ============================================================================
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub enum RepeatMode {
+    Off,
+    All,
+    One,
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum SearchTab {
+    Tracks,
+    Videos,
+}
+
+#[derive(Clone, PartialEq, Eq)]
+enum ActiveView {
+    Home,
+    Search,
+    Collection { title: String },
+}
+
+#[derive(Clone)]
+struct HomeShelf {
+    key: &'static str,
+    title: &'static str,
+    subtitle: &'static str,
+    loading: bool,
+    error: Option<String>,
+    items: Vec<HomeItem>,
+}
+
+enum AsyncEvent {
+    HomeLoaded {
+        view_id: u64,
+        key: &'static str,
+        res: Result<Vec<HomeItem>, String>,
+    },
+    SearchLoaded {
+        view_id: u64,
+        res: Result<Vec<Track>, String>,
+    },
+    CollectionLoaded {
+        view_id: u64,
+        res: Result<Vec<Track>, String>,
+    },
+    StreamsResolved {
+        playback_id: u64,
+        start_pos: f64,
+        autoplay: bool,
+        res: Result<StreamsResponse, String>,
+    },
+    RadioLoaded {
+        seed_id: String,
+        res: Result<Vec<Track>, String>,
+    },
+    CoverLoaded {
+        url: String,
+        image: Option<ColorImage>,
+    },
+}
+
+pub enum TrayCmd {
+    ShowWindow,
+    TogglePlay,
+    Quit,
+}
+
+pub struct NadaApp {
+    backend: Arc<Backend>,
+    rt: tokio::runtime::Handle,
+    media: MediaEngine,
+    ev_tx: mpsc::Sender<AsyncEvent>,
+    ev_rx: mpsc::Receiver<AsyncEvent>,
+    tray_rx: mpsc::Receiver<TrayCmd>,
+    tray_tooltip_cb: Option<Box<dyn Fn(&str) + Send>>,
+    allow_quit: Arc<AtomicBool>,
+
+    // Navigation & data state
+    view: ActiveView,
+    view_id: u64,
+    search_query: String,
+    search_tab: SearchTab,
+    status_text: Option<String>,
+    results: Vec<Track>,
+    shelves: Vec<HomeShelf>,
+
+    // Playback queue & modes
+    queue: Vec<Track>,
+    original_queue: Vec<Track>,
+    queue_index: Option<usize>,
+    repeat: RepeatMode,
+    shuffle: bool,
+    want_video: bool,
+    pip_open: bool,
+    queue_open: bool,
+    volume: f32,
+    seeking_val: Option<f64>,
+    playback_id: u64,
+    radio_fetching: bool,
+    last_ended_session: u64,
+
+    // Cached GPU textures
+    covers: HashMap<String, TextureHandle>,
+    pending_covers: HashSet<String>,
+    video_tex: Option<TextureHandle>,
+    last_video_pts: f64,
+    toast: Option<(String, Instant)>,
+}
+
+impl NadaApp {
+    pub fn new(
+        cc: &eframe::CreationContext<'_>,
+        backend: Arc<Backend>,
+        rt: tokio::runtime::Handle,
+        tray_rx: mpsc::Receiver<TrayCmd>,
+        tray_tooltip_cb: Option<Box<dyn Fn(&str) + Send>>,
+        allow_quit: Arc<AtomicBool>,
+    ) -> Self {
+        configure_visuals(&cc.egui_ctx);
+
+        let ctx_repaint = cc.egui_ctx.clone();
+        let repaint_cb: Arc<dyn Fn() + Send + Sync> = Arc::new(move || {
+            ctx_repaint.request_repaint();
+        });
+        let media = MediaEngine::start(Some(repaint_cb));
+
+        let (ev_tx, ev_rx) = mpsc::channel();
+
+        let shelves = vec![
+            HomeShelf {
+                key: "indonesia",
+                title: "Lagi Hits di Indonesia",
+                subtitle: "Chart musik harian terpopuler",
+                loading: true,
+                error: None,
+                items: Vec::new(),
+            },
+            HomeShelf {
+                key: "international",
+                title: "Top Global",
+                subtitle: "Lagu populer mancanegara",
+                loading: true,
+                error: None,
+                items: Vec::new(),
+            },
+            HomeShelf {
+                key: "releases",
+                title: "Rilisan Baru",
+                subtitle: "Album terbaru pilihan",
+                loading: true,
+                error: None,
+                items: Vec::new(),
+            },
+            HomeShelf {
+                key: "community",
+                title: "Playlist Komunitas",
+                subtitle: "Kurasi populer pendengar",
+                loading: true,
+                error: None,
+                items: Vec::new(),
+            },
+        ];
+
+        let mut app = Self {
+            backend,
+            rt,
+            media,
+            ev_tx,
+            ev_rx,
+            tray_rx,
+            tray_tooltip_cb,
+            allow_quit,
+            view: ActiveView::Home,
+            view_id: 1,
+            search_query: String::new(),
+            search_tab: SearchTab::Tracks,
+            status_text: None,
+            results: Vec::new(),
+            shelves,
+            queue: Vec::new(),
+            original_queue: Vec::new(),
+            queue_index: None,
+            repeat: RepeatMode::Off,
+            shuffle: false,
+            want_video: false,
+            pip_open: false,
+            queue_open: false,
+            volume: 0.8,
+            seeking_val: None,
+            playback_id: 0,
+            radio_fetching: false,
+            last_ended_session: 0,
+            covers: HashMap::new(),
+            pending_covers: HashSet::new(),
+            video_tex: None,
+            last_video_pts: -1.0,
+            toast: None,
+        };
+
+        app.load_home(cc.egui_ctx.clone());
+        app
+    }
+
+    fn show_toast(&mut self, msg: impl Into<String>) {
+        self.toast = Some((msg.into(), Instant::now() + Duration::from_secs(3)));
+    }
+
+    fn load_home(&mut self, ctx: egui::Context) {
+        self.view = ActiveView::Home;
+        self.view_id = self.view_id.wrapping_add(1);
+        self.status_text = None;
+        let vid = self.view_id;
+
+        for shelf in &mut self.shelves {
+            shelf.loading = true;
+            shelf.error = None;
+            let key = shelf.key;
+            let backend = self.backend.clone();
+            let tx = self.ev_tx.clone();
+            let ctx_cl = ctx.clone();
+            self.rt.spawn(async move {
+                let res = backend.home_section(key).await.map(|s| s.items);
+                let _ = tx.send(AsyncEvent::HomeLoaded {
+                    view_id: vid,
+                    key,
+                    res,
+                });
+                ctx_cl.request_repaint();
+            });
+        }
+    }
+
+    fn trigger_search(&mut self, ctx: egui::Context) {
+        let q = self.search_query.trim().to_string();
+        if q.is_empty() {
+            return;
+        }
+        self.view = ActiveView::Search;
+        self.view_id = self.view_id.wrapping_add(1);
+        let vid = self.view_id;
+        self.results.clear();
+        self.status_text = Some("Mencari…".to_string());
+
+        let kind = match self.search_tab {
+            SearchTab::Tracks => "tracks",
+            SearchTab::Videos => "videos",
+        };
+        let backend = self.backend.clone();
+        let tx = self.ev_tx.clone();
+        self.rt.spawn(async move {
+            let res = backend.search(&q, kind).await;
+            let _ = tx.send(AsyncEvent::SearchLoaded { view_id: vid, res });
+            ctx.request_repaint();
+        });
+    }
+
+    fn open_collection(&mut self, item: &HomeItem, ctx: egui::Context) {
+        let title = item.name.clone();
+        let id = item.id.clone();
+        let kind = item.kind.clone();
+        self.view = ActiveView::Collection {
+            title: title.clone(),
+        };
+        self.view_id = self.view_id.wrapping_add(1);
+        let vid = self.view_id;
+        self.results.clear();
+        self.status_text = Some("Memuat koleksi…".to_string());
+
+        let backend = self.backend.clone();
+        let tx = self.ev_tx.clone();
+        self.rt.spawn(async move {
+            let res = backend.collection_tracks(&id, &kind).await;
+            let _ = tx.send(AsyncEvent::CollectionLoaded { view_id: vid, res });
+            ctx.request_repaint();
+        });
+    }
+
+    fn set_queue(&mut self, tracks: Vec<Track>, start_idx: usize) {
+        self.original_queue = tracks.clone();
+        if self.shuffle && tracks.len() > 1 {
+            let mut next_q = Vec::with_capacity(tracks.len());
+            if let Some(chosen) = tracks.get(start_idx).cloned() {
+                next_q.push(chosen);
+            }
+            let mut rest: Vec<Track> = tracks
+                .into_iter()
+                .enumerate()
+                .filter_map(|(i, t)| if i == start_idx { None } else { Some(t) })
+                .collect();
+            simple_shuffle(&mut rest);
+            next_q.extend(rest);
+            self.queue = next_q;
+            self.queue_index = Some(0);
+        } else {
+            self.queue = tracks;
+            self.queue_index = if self.queue.is_empty() {
+                None
+            } else {
+                Some(start_idx.min(self.queue.len() - 1))
+            };
+        }
+    }
+
+    fn current_track(&self) -> Option<&Track> {
+        self.queue_index.and_then(|i| self.queue.get(i))
+    }
+
+    fn start_current_track(&mut self, start_pos: f64, autoplay: bool, ctx: egui::Context) {
+        let Some(track) = self.current_track().cloned() else {
+            return;
+        };
+
+        self.playback_id = self.playback_id.wrapping_add(1);
+        let pid = self.playback_id;
+        self.last_video_pts = -1.0;
+        if !self.want_video {
+            self.pip_open = false;
+            self.video_tex = None;
+        }
+
+        if let Some(cb) = &self.tray_tooltip_cb {
+            let tip = if track.artist.is_empty() {
+                track.name.clone()
+            } else {
+                format!("{} — {}", track.name, track.artist)
+            };
+            cb(&tip);
+        }
+
+        self.request_cover(&track.cover, &ctx);
+        self.status_text = Some("Mengambil stream…".to_string());
+
+        // Inform media engine immediately so loading state reflects right away
+        self.media.stop();
+
+        let backend = self.backend.clone();
+        let tx = self.ev_tx.clone();
+        let vid_id = track.id.clone();
+        self.rt.spawn(async move {
+            let res = backend.streams(&vid_id).await;
+            let _ = tx.send(AsyncEvent::StreamsResolved {
+                playback_id: pid,
+                start_pos,
+                autoplay,
+                res,
+            });
+            ctx.request_repaint();
+        });
+    }
+
+    fn toggle_play(&mut self, snap: &MediaSnapshot, ctx: &egui::Context) {
+        if self.current_track().is_none() {
+            return;
+        }
+        if snap.session_id == 0 && !snap.loading {
+            self.start_current_track(0.0, true, ctx.clone());
+            return;
+        }
+        self.media.set_paused(snap.playing);
+    }
+
+    fn next_track(&mut self, auto_ended: bool, ctx: &egui::Context) {
+        let Some(idx) = self.queue_index else {
+            return;
+        };
+        if self.queue.is_empty() {
+            return;
+        }
+
+        if auto_ended && self.repeat == RepeatMode::One {
+            self.start_current_track(0.0, true, ctx.clone());
+            return;
+        }
+
+        if idx + 1 < self.queue.len() {
+            self.queue_index = Some(idx + 1);
+            self.start_current_track(0.0, true, ctx.clone());
+            return;
+        }
+
+        if self.repeat == RepeatMode::All {
+            self.queue_index = Some(0);
+            self.start_current_track(0.0, true, ctx.clone());
+            return;
+        }
+
+        // Queue exhausted -> fetch infinite YouTube Music radio continuation
+        if !self.radio_fetching {
+            if let Some(seed) = self.current_track().map(|t| t.id.clone()) {
+                self.radio_fetching = true;
+                self.status_text = Some("Memuat radio lanjutan…".to_string());
+                let backend = self.backend.clone();
+                let tx = self.ev_tx.clone();
+                let ctx_cl = ctx.clone();
+                self.rt.spawn(async move {
+                    let res = backend.radio(&seed).await;
+                    let _ = tx.send(AsyncEvent::RadioLoaded {
+                        seed_id: seed,
+                        res,
+                    });
+                    ctx_cl.request_repaint();
+                });
+            }
+        }
+    }
+
+    fn prev_track(&mut self, snap: &MediaSnapshot, ctx: &egui::Context) {
+        if snap.position_secs > 3.0 {
+            self.media.seek(0.0);
+            return;
+        }
+        if let Some(idx) = self.queue_index {
+            if idx > 0 {
+                self.queue_index = Some(idx - 1);
+                self.start_current_track(0.0, true, ctx.clone());
+            } else {
+                self.media.seek(0.0);
+            }
+        }
+    }
+
+    fn toggle_repeat(&mut self) {
+        self.repeat = match self.repeat {
+            RepeatMode::Off => RepeatMode::All,
+            RepeatMode::All => RepeatMode::One,
+            RepeatMode::One => RepeatMode::Off,
+        };
+    }
+
+    fn toggle_shuffle(&mut self) {
+        self.shuffle = !self.shuffle;
+        let Some(cur_id) = self.current_track().map(|t| t.id.clone()) else {
+            return;
+        };
+        if self.shuffle {
+            if self.original_queue.is_empty() {
+                self.original_queue = self.queue.clone();
+            }
+            let cur_track = self.current_track().cloned();
+            let mut rest: Vec<Track> = self
+                .queue
+                .iter()
+                .filter(|t| t.id != cur_id)
+                .cloned()
+                .collect();
+            simple_shuffle(&mut rest);
+            let mut next_q = Vec::with_capacity(rest.len() + 1);
+            if let Some(c) = cur_track {
+                next_q.push(c);
+            }
+            next_q.extend(rest);
+            self.queue = next_q;
+            self.queue_index = Some(0);
+        } else if !self.original_queue.is_empty() {
+            self.queue = self.original_queue.clone();
+            self.queue_index = self.queue.iter().position(|t| t.id == cur_id).or(Some(0));
+        }
+    }
+
+    fn toggle_video_mode(&mut self, snap: &MediaSnapshot, ctx: &egui::Context) {
+        self.want_video = !self.want_video;
+        if !self.want_video {
+            self.pip_open = false;
+            self.video_tex = None;
+        }
+        if self.current_track().is_some() {
+            let pos = snap.position_secs;
+            let playing = snap.playing || snap.loading;
+            self.start_current_track(pos, playing, ctx.clone());
+        }
+    }
+
+    fn request_cover(&mut self, cover_opt: &Option<String>, ctx: &egui::Context) {
+        let Some(url) = cover_opt.as_ref().filter(|s| !s.is_empty()) else {
+            return;
+        };
+        if self.covers.contains_key(url) || self.pending_covers.contains(url) {
+            return;
+        }
+        self.pending_covers.insert(url.clone());
+        let url_cl = url.clone();
+        let http = self.backend.bg.http_client().clone();
+        let tx = self.ev_tx.clone();
+        let ctx_cl = ctx.clone();
+        self.rt.spawn(async move {
+            let img_opt = match http.get(&url_cl).send().await {
+                Ok(resp) if resp.status().is_success() => match resp.bytes().await {
+                    Ok(bytes) => image::load_from_memory(&bytes).ok().map(|dyn_img| {
+                        let thumb = dyn_img.thumbnail(256, 256).to_rgba8();
+                        let (w, h) = thumb.dimensions();
+                        ColorImage::from_rgba_unmultiplied([w as usize, h as usize], &thumb)
+                    }),
+                    Err(_) => None,
+                },
+                _ => None,
+            };
+            let _ = tx.send(AsyncEvent::CoverLoaded {
+                url: url_cl,
+                image: img_opt,
+            });
+            ctx_cl.request_repaint();
+        });
+    }
+
+    fn process_events(&mut self, ctx: &egui::Context, snap: &MediaSnapshot) {
+        // Tray events
+        while let Ok(tcmd) = self.tray_rx.try_recv() {
+            match tcmd {
+                TrayCmd::ShowWindow => {
+                    ctx.send_viewport_cmd(ViewportCommand::Visible(true));
+                    ctx.send_viewport_cmd(ViewportCommand::Minimized(false));
+                    ctx.send_viewport_cmd(ViewportCommand::Focus);
+                }
+                TrayCmd::TogglePlay => {
+                    self.toggle_play(snap, ctx);
+                }
+                TrayCmd::Quit => {
+                    self.allow_quit.store(true, Ordering::Release);
+                    self.media.stop();
+                    ctx.send_viewport_cmd(ViewportCommand::Close);
+                }
+            }
+        }
+
+        // Async backend events
+        while let Ok(ev) = self.ev_rx.try_recv() {
+            match ev {
+                AsyncEvent::HomeLoaded { view_id, key, res } => {
+                    if view_id != self.view_id {
+                        continue;
+                    }
+                    if let Some(shelf) = self.shelves.iter_mut().find(|s| s.key == key) {
+                        shelf.loading = false;
+                        match res {
+                            Ok(items) => {
+                                for it in &items {
+                                    // Preload visible covers lazily during render
+                                    let _ = it;
+                                }
+                                shelf.items = items;
+                                shelf.error = None;
+                            }
+                            Err(e) => {
+                                shelf.error = Some(e);
+                            }
+                        }
+                    }
+                }
+                AsyncEvent::SearchLoaded { view_id, res } => {
+                    if view_id != self.view_id {
+                        continue;
+                    }
+                    self.status_text = None;
+                    match res {
+                        Ok(tracks) => self.results = tracks,
+                        Err(e) => self.show_toast(format!("Gagal mencari: {e}")),
+                    }
+                }
+                AsyncEvent::CollectionLoaded { view_id, res } => {
+                    if view_id != self.view_id {
+                        continue;
+                    }
+                    self.status_text = None;
+                    match res {
+                        Ok(tracks) => self.results = tracks,
+                        Err(e) => self.show_toast(format!("Gagal memuat koleksi: {e}")),
+                    }
+                }
+                AsyncEvent::StreamsResolved {
+                    playback_id,
+                    start_pos,
+                    autoplay,
+                    res,
+                } => {
+                    if playback_id != self.playback_id {
+                        continue;
+                    }
+                    self.status_text = None;
+                    match res {
+                        Ok(streams) => {
+                            let audio_candidates = streams
+                                .audio
+                                .into_iter()
+                                .map(|a| StreamInput {
+                                    url: a.url,
+                                    mime: a.mime,
+                                })
+                                .collect();
+                            let muxed_candidates = streams
+                                .muxed
+                                .into_iter()
+                                .filter(|v| v.height <= 720)
+                                .map(|v| StreamInput {
+                                    url: v.url,
+                                    mime: v.mime,
+                                })
+                                .collect();
+                            let video_candidates = streams
+                                .video_only
+                                .into_iter()
+                                .filter(|v| v.height <= 720)
+                                .map(|v| StreamInput {
+                                    url: v.url,
+                                    mime: v.mime,
+                                })
+                                .collect();
+
+                            self.media.play(PlayRequest {
+                                session_id: playback_id,
+                                audio_candidates,
+                                muxed_candidates,
+                                video_candidates,
+                                want_video: self.want_video,
+                                start_pos_secs: start_pos,
+                                autoplay,
+                            });
+                        }
+                        Err(e) => {
+                            self.show_toast(format!("Stream gagal dimuat: {e}"));
+                        }
+                    }
+                }
+                AsyncEvent::RadioLoaded { seed_id, res } => {
+                    self.radio_fetching = false;
+                    self.status_text = None;
+                    if self.current_track().map(|t| t.id.as_str()) != Some(seed_id.as_str()) {
+                        continue;
+                    }
+                    if let Ok(radio_tracks) = res {
+                        let existing: HashSet<String> =
+                            self.queue.iter().map(|t| t.id.clone()).collect();
+                        let fresh: Vec<Track> = radio_tracks
+                            .into_iter()
+                            .filter(|t| !existing.contains(&t.id))
+                            .collect();
+                        if !fresh.is_empty() {
+                            let next_idx = self.queue.len();
+                            self.queue.extend(fresh.clone());
+                            self.original_queue.extend(fresh);
+                            self.queue_index = Some(next_idx);
+                            self.start_current_track(0.0, true, ctx.clone());
+                        }
+                    }
+                }
+                AsyncEvent::CoverLoaded { url, image } => {
+                    self.pending_covers.remove(&url);
+                    if let Some(img) = image {
+                        let tex =
+                            ctx.load_texture(format!("cover:{url}"), img, TextureOptions::LINEAR);
+                        self.covers.insert(url, tex);
+                    }
+                }
+            }
+        }
+
+        // Upload latest video frame to GPU texture if PTS advanced
+        if let Some(vf) = &snap.latest_frame {
+            if (vf.pts_secs - self.last_video_pts).abs() > 0.001 {
+                self.last_video_pts = vf.pts_secs;
+                let color_img = ColorImage::from_rgba_unmultiplied(
+                    [vf.width as usize, vf.height as usize],
+                    &vf.rgba,
+                );
+                if let Some(tex) = &mut self.video_tex {
+                    tex.set(color_img, TextureOptions::LINEAR);
+                } else {
+                    self.video_tex =
+                        Some(ctx.load_texture("video_stage", color_img, TextureOptions::LINEAR));
+                }
+            }
+        }
+
+        // Auto-advance when current track finishes
+        if snap.ended
+            && snap.session_id == self.playback_id
+            && self.playback_id != 0
+            && self.last_ended_session != snap.session_id
+        {
+            self.last_ended_session = snap.session_id;
+            self.next_track(true, ctx);
+        }
+
+        if let Some(err) = &snap.error {
+            if snap.session_id == self.playback_id && self.toast.is_none() {
+                self.show_toast(err.clone());
+            }
+        }
+    }
+
+    fn handle_shortcuts(&mut self, ctx: &egui::Context, snap: &MediaSnapshot) {
+        if ctx.egui_wants_keyboard_input() {
+            return;
+        }
+        let mut do_toggle = false;
+        let mut seek_delta: Option<f64> = None;
+        let mut do_repeat = false;
+        let mut do_shuffle = false;
+
+        ctx.input(|i| {
+            if i.key_pressed(Key::Space) {
+                do_toggle = true;
+            }
+            if i.key_pressed(Key::ArrowRight) {
+                seek_delta = Some(5.0);
+            }
+            if i.key_pressed(Key::ArrowLeft) {
+                seek_delta = Some(-5.0);
+            }
+            if i.key_pressed(Key::R) {
+                do_repeat = true;
+            }
+            if i.key_pressed(Key::S) {
+                do_shuffle = true;
+            }
+        });
+
+        if do_toggle {
+            self.toggle_play(snap, ctx);
+        }
+        if let Some(d) = seek_delta {
+            let max_dur = self.effective_duration(snap);
+            let target = (snap.position_secs + d).clamp(0.0, max_dur.max(0.0));
+            self.media.seek(target);
+        }
+        if do_repeat {
+            self.toggle_repeat();
+        }
+        if do_shuffle {
+            self.toggle_shuffle();
+        }
+    }
+
+    fn effective_duration(&self, snap: &MediaSnapshot) -> f64 {
+        if snap.duration_secs > 0.5 {
+            snap.duration_secs
+        } else {
+            self.current_track()
+                .and_then(|t| t.duration)
+                .map(|d| d as f64)
+                .unwrap_or(0.0)
+        }
+    }
+
+    fn render_header(&mut self, ui: &mut Ui) {
+        let ctx = ui.ctx().clone();
+        Frame::new()
+            .fill(BG_STUDIO)
+            .inner_margin(Margin::symmetric(14, 10))
+            .show(ui, |ui| {
+                // Brand row: "nada." + Glisse "Beranda" button (no STUDIO pill)
+                ui.horizontal(|ui| {
+                    ui.spacing_mut().item_spacing.x = 0.0;
+                    ui.label(
+                        RichText::new("nada")
+                            .size(21.0)
+                            .strong()
+                            .color(TEXT_MAIN),
+                    );
+                    ui.label(
+                        RichText::new(".")
+                            .size(21.0)
+                            .strong()
+                            .color(ACCENT_BRASS),
+                    );
+                    ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                        if glisse_button(
+                            ui,
+                            "home_btn",
+                            "Beranda",
+                            Vec2::new(76.0, 28.0),
+                            GlisseVariant::Glass,
+                        )
+                        .clicked()
+                        {
+                            self.load_home(ctx.clone());
+                        }
+                    });
+                });
+
+                ui.add_space(8.0);
+
+                // Search bar container
+                Frame::new()
+                    .fill(SURFACE_PANEL)
+                    .stroke(Stroke::new(1.0, BORDER_SUBTLE))
+                    .corner_radius(CornerRadius::same(12))
+                    .inner_margin(Margin::symmetric(10, 4))
+                    .show(ui, |ui| {
+                        ui.horizontal(|ui| {
+                            let avail_w = (ui.available_width()
+                                - if self.search_query.is_empty() {
+                                    36.0
+                                } else {
+                                    68.0
+                                })
+                            .max(120.0);
+                            let edit = egui::TextEdit::singleline(&mut self.search_query)
+                                .hint_text(
+                                    RichText::new("Cari lagu atau video…").color(TEXT_DIMMED),
+                                )
+                                .frame(Frame::NONE)
+                                .desired_width(avail_w)
+                                .text_color(TEXT_MAIN);
+                            let resp = ui.add(edit);
+                            if resp.lost_focus() && ui.input(|i| i.key_pressed(Key::Enter)) {
+                                self.trigger_search(ctx.clone());
+                            }
+
+                            if !self.search_query.is_empty()
+                                && glisse_button(
+                                    ui,
+                                    "clear_search",
+                                    "×",
+                                    Vec2::new(26.0, 26.0),
+                                    GlisseVariant::Glass,
+                                )
+                                .clicked()
+                            {
+                                self.search_query.clear();
+                            }
+
+                            if glisse_button(
+                                ui,
+                                "search_btn",
+                                "⌕",
+                                Vec2::new(28.0, 28.0),
+                                GlisseVariant::Glass,
+                            )
+                            .clicked()
+                            {
+                                self.trigger_search(ctx.clone());
+                            }
+                        });
+                    });
+
+                ui.add_space(8.0);
+
+                // Segmented Lagu / Video Glisse buttons
+                ui.horizontal(|ui| {
+                    let tracks_v = if self.search_tab == SearchTab::Tracks {
+                        GlisseVariant::Filled(GLASS_TERRACOTTA)
+                    } else {
+                        GlisseVariant::Glass
+                    };
+                    if glisse_button(ui, "tab_tracks", "Lagu", Vec2::new(66.0, 26.0), tracks_v)
+                        .clicked()
+                        && self.search_tab != SearchTab::Tracks
+                    {
+                        self.search_tab = SearchTab::Tracks;
+                        if !self.search_query.trim().is_empty() {
+                            self.trigger_search(ctx.clone());
+                        }
+                    }
+
+                    let videos_v = if self.search_tab == SearchTab::Videos {
+                        GlisseVariant::Filled(GLASS_TERRACOTTA)
+                    } else {
+                        GlisseVariant::Glass
+                    };
+                    if glisse_button(ui, "tab_videos", "Video", Vec2::new(68.0, 26.0), videos_v)
+                        .clicked()
+                        && self.search_tab != SearchTab::Videos
+                    {
+                        self.search_tab = SearchTab::Videos;
+                        if !self.search_query.trim().is_empty() {
+                            self.trigger_search(ctx.clone());
+                        }
+                    }
+                });
+            });
+    }
+
+    fn render_video_stage(&mut self, ui: &mut Ui) {
+        if !self.want_video || self.pip_open {
+            return;
+        }
+        let w = ui.available_width();
+        let stage_h = (w * 9.0 / 16.0).min(242.0);
+        let (stage_rect, stage_resp) =
+            ui.allocate_exact_size(Vec2::new(w, stage_h), Sense::click());
+
+        let painter = ui.painter_at(stage_rect);
+        painter.rect_filled(stage_rect, CornerRadius::ZERO, Color32::BLACK);
+
+        if let Some(tex) = &self.video_tex {
+            let tex_size = tex.size_vec2();
+            if tex_size.x > 0.0 && tex_size.y > 0.0 {
+                // 16:9 uncropped object-fit: contain
+                let scale = (stage_rect.width() / tex_size.x).min(stage_rect.height() / tex_size.y);
+                let draw_size = tex_size * scale;
+                let draw_rect = Rect::from_center_size(stage_rect.center(), draw_size);
+                painter.image(
+                    tex.id(),
+                    draw_rect,
+                    Rect::from_min_max(Pos2::ZERO, Pos2::new(1.0, 1.0)),
+                    Color32::WHITE,
+                );
+            }
+        } else {
+            painter.text(
+                stage_rect.center(),
+                egui::Align2::CENTER_CENTER,
+                "Memuat video…",
+                FontId::proportional(12.0),
+                TEXT_DIMMED,
+            );
+        }
+
+        // Right-click context menu on video stage for PiP
+        stage_resp.context_menu(|ui| {
+            if ui.button("Picture in Picture").clicked() {
+                self.pip_open = true;
+                ui.close();
+            }
+        });
+
+        // Floating Glisse PiP button top-right
+        let pip_rect = Rect::from_min_size(
+            Pos2::new(stage_rect.right() - 42.0, stage_rect.top() + 8.0),
+            Vec2::new(32.0, 32.0),
+        );
+        let mut child = ui.new_child(egui::UiBuilder::new().max_rect(pip_rect));
+        let pip_variant = if self.pip_open {
+            GlisseVariant::ActiveTint(ACCENT_BRASS)
+        } else {
+            GlisseVariant::Glass
+        };
+        if glisse_button(
+            &mut child,
+            "stage_pip_btn",
+            "⧉",
+            Vec2::new(32.0, 32.0),
+            pip_variant,
+        )
+        .on_hover_text("Picture in Picture")
+        .clicked()
+        {
+            self.pip_open = !self.pip_open;
+        }
+    }
+
+    fn render_pip_viewport(&mut self, ctx: &egui::Context, snap: &MediaSnapshot) {
+        if !self.pip_open || !self.want_video {
+            return;
+        }
+
+        let pip_id = ViewportId::from_hash_of("nada_pip_viewport");
+        let title = self
+            .current_track()
+            .map(|t| format!("Nada PiP — {}", t.name))
+            .unwrap_or_else(|| "Nada PiP".to_string());
+
+        let builder = ViewportBuilder::default()
+            .with_title(title)
+            .with_inner_size([360.0, 202.5])
+            .with_min_inner_size([240.0, 135.0])
+            .with_always_on_top();
+
+        let tex_opt = self.video_tex.clone();
+        let is_playing = snap.playing;
+        let close_pip = Arc::new(AtomicBool::new(false));
+        let toggle_play = Arc::new(AtomicBool::new(false));
+        let close_cl = close_pip.clone();
+        let toggle_cl = toggle_play.clone();
+
+        ctx.show_viewport_immediate(pip_id, builder, |ui, _class| {
+            let pip_ctx = ui.ctx().clone();
+            if pip_ctx.input(|i| i.viewport().close_requested()) {
+                close_cl.store(true, Ordering::Release);
+            }
+
+            egui::CentralPanel::default()
+                .frame(Frame::new().fill(Color32::BLACK))
+                .show(ui, |ui| {
+                    let rect = ui.max_rect();
+                    let resp = ui.allocate_rect(rect, Sense::click());
+                    let painter = ui.painter_at(rect);
+
+                    if let Some(tex) = &tex_opt {
+                        let ts = tex.size_vec2();
+                        if ts.x > 0.0 && ts.y > 0.0 {
+                            let scale = (rect.width() / ts.x).min(rect.height() / ts.y);
+                            let dst = Rect::from_center_size(rect.center(), ts * scale);
+                            painter.image(
+                                tex.id(),
+                                dst,
+                                Rect::from_min_max(Pos2::ZERO, Pos2::new(1.0, 1.0)),
+                                Color32::WHITE,
+                            );
+                        }
+                    } else {
+                        painter.text(
+                            rect.center(),
+                            egui::Align2::CENTER_CENTER,
+                            "Picture in Picture",
+                            FontId::proportional(13.0),
+                            TEXT_DIMMED,
+                        );
+                    }
+
+                    // Overlay PiP controls on hover
+                    if resp.hovered() {
+                        let ctrl_rect = Rect::from_center_size(
+                            Pos2::new(rect.center().x, rect.bottom() - 26.0),
+                            Vec2::new(96.0, 36.0),
+                        );
+                        let mut child = ui.new_child(egui::UiBuilder::new().max_rect(ctrl_rect));
+                        child.horizontal(|ui| {
+                            let icon = if is_playing { "⏸" } else { "▶" };
+                            if glisse_button(
+                                ui,
+                                "pip_play_toggle",
+                                icon,
+                                Vec2::new(36.0, 36.0),
+                                GlisseVariant::Filled(ACCENT_BRASS),
+                            )
+                            .clicked()
+                            {
+                                toggle_cl.store(true, Ordering::Release);
+                            }
+                            if glisse_button(
+                                ui,
+                                "pip_exit_btn",
+                                "✕",
+                                Vec2::new(36.0, 36.0),
+                                GlisseVariant::Glass,
+                            )
+                            .on_hover_text("Tutup PiP")
+                            .clicked()
+                            {
+                                close_cl.store(true, Ordering::Release);
+                            }
+                        });
+                    }
+                });
+        });
+
+        if toggle_play.load(Ordering::Acquire) {
+            self.toggle_play(snap, ctx);
+        }
+        if close_pip.load(Ordering::Acquire) {
+            self.pip_open = false;
+        }
+    }
+
+    fn render_player_dock(&mut self, ui: &mut Ui, snap: &MediaSnapshot) {
+        let ctx = ui.ctx().clone();
+        let dur = self.effective_duration(snap);
+        let cur = self.seeking_val.unwrap_or(snap.position_secs).clamp(0.0, dur.max(0.0));
+
+        Frame::new()
+            .fill(SURFACE_PANEL)
+            .stroke(Stroke::new(1.0, BORDER_SUBTLE))
+            .inner_margin(Margin::symmetric(14, 10))
+            .show(ui, |ui| {
+                // Row 1: Progress bar
+                ui.horizontal(|ui| {
+                    ui.label(
+                        RichText::new(format_time(cur))
+                            .monospace()
+                            .size(11.0)
+                            .color(TEXT_DIMMED),
+                    );
+                    let slider_w = (ui.available_width() - 46.0).max(80.0);
+                    ui.spacing_mut().slider_width = slider_w;
+                    let mut slider_pos = cur;
+                    let max_r = if dur > 0.5 { dur } else { 1.0 };
+                    let s_resp = ui.add(
+                        egui::Slider::new(&mut slider_pos, 0.0..=max_r)
+                            .show_value(false)
+                            .trailing_fill(true),
+                    );
+                    if s_resp.dragged() || s_resp.changed() {
+                        self.seeking_val = Some(slider_pos);
+                    }
+                    if s_resp.drag_stopped()
+                        || (s_resp.changed() && !ui.input(|i| i.pointer.any_down()))
+                    {
+                        if let Some(target) = self.seeking_val.take() {
+                            self.media.seek(target);
+                        }
+                    }
+
+                    ui.label(
+                        RichText::new(format_time(dur))
+                            .monospace()
+                            .size(11.0)
+                            .color(TEXT_DIMMED),
+                    );
+                });
+
+                ui.add_space(6.0);
+
+                // Row 2: Cover + Track Meta + Prev / Play / Next Glisse Buttons
+                ui.horizontal(|ui| {
+                    let cur_track = self.current_track().cloned();
+                    if let Some(t) = &cur_track {
+                        self.request_cover(&t.cover, &ctx);
+                        let (cov_rect, _) =
+                            ui.allocate_exact_size(Vec2::new(44.0, 44.0), Sense::hover());
+                        if let Some(url) = &t.cover {
+                            if let Some(tex) = self.covers.get(url) {
+                                ui.painter().image(
+                                    tex.id(),
+                                    cov_rect,
+                                    Rect::from_min_max(Pos2::ZERO, Pos2::new(1.0, 1.0)),
+                                    Color32::WHITE,
+                                );
+                            } else {
+                                ui.painter().rect_filled(
+                                    cov_rect,
+                                    CornerRadius::same(8),
+                                    SURFACE_CARD,
+                                );
+                            }
+                        } else {
+                            ui.painter()
+                                .rect_filled(cov_rect, CornerRadius::same(8), SURFACE_CARD);
+                        }
+                    }
+
+                    let meta_w = (ui.available_width() - 126.0).max(80.0);
+                    ui.allocate_ui_with_layout(
+                        Vec2::new(meta_w, 44.0),
+                        Layout::top_down(Align::Min),
+                        |ui| {
+                            if snap.loading {
+                                ui.label(
+                                    RichText::new("Memuat stream…")
+                                        .strong()
+                                        .size(13.0)
+                                        .color(ACCENT_GOLD),
+                                );
+                                if let Some(t) = &cur_track {
+                                    ui.add(
+                                        egui::Label::new(
+                                            RichText::new(&t.name).size(11.5).color(TEXT_MUTED),
+                                        )
+                                        .truncate(),
+                                    );
+                                }
+                            } else if let Some(t) = &cur_track {
+                                ui.add(
+                                    egui::Label::new(
+                                        RichText::new(&t.name)
+                                            .strong()
+                                            .size(13.0)
+                                            .color(TEXT_MAIN),
+                                    )
+                                    .truncate(),
+                                );
+                                ui.add(
+                                    egui::Label::new(
+                                        RichText::new(&t.artist).size(11.5).color(TEXT_MUTED),
+                                    )
+                                    .truncate(),
+                                );
+                            } else {
+                                ui.label(
+                                    RichText::new("Belum muter apa-apa")
+                                        .strong()
+                                        .size(13.0)
+                                        .color(TEXT_MAIN),
+                                );
+                                ui.label(
+                                    RichText::new("Pilih lagu untuk mulai")
+                                        .size(11.5)
+                                        .color(TEXT_MUTED),
+                                );
+                            }
+                        },
+                    );
+
+                    ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                        ui.spacing_mut().item_spacing.x = 6.0;
+                        if glisse_button(
+                            ui,
+                            "next_btn",
+                            "⏭",
+                            Vec2::new(34.0, 34.0),
+                            GlisseVariant::Glass,
+                        )
+                        .on_hover_text("Berikutnya")
+                        .clicked()
+                        {
+                            self.next_track(false, &ctx);
+                        }
+
+                        let play_label = if snap.loading {
+                            "…"
+                        } else if snap.playing {
+                            "⏸"
+                        } else {
+                            "▶"
+                        };
+                        if glisse_button(
+                            ui,
+                            "play_btn",
+                            play_label,
+                            Vec2::new(40.0, 40.0),
+                            GlisseVariant::Filled(ACCENT_BRASS),
+                        )
+                        .on_hover_text("Play / Pause (Space)")
+                        .clicked()
+                        {
+                            self.toggle_play(snap, &ctx);
+                        }
+
+                        if glisse_button(
+                            ui,
+                            "prev_btn",
+                            "⏮",
+                            Vec2::new(34.0, 34.0),
+                            GlisseVariant::Glass,
+                        )
+                        .on_hover_text("Sebelumnya")
+                        .clicked()
+                        {
+                            self.prev_track(snap, &ctx);
+                        }
+                    });
+                });
+
+                ui.add_space(6.0);
+
+                // Row 3: Repeat, Shuffle, Video Toggle, Volume Slider, Queue Button
+                ui.horizontal(|ui| {
+                    let rep_variant = if self.repeat != RepeatMode::Off {
+                        GlisseVariant::ActiveTint(GLASS_TERRACOTTA)
+                    } else {
+                        GlisseVariant::Glass
+                    };
+                    let rep_label = match self.repeat {
+                        RepeatMode::One => "🔁1",
+                        _ => "🔁",
+                    };
+                    if glisse_button(ui, "repeat_btn", rep_label, Vec2::new(34.0, 28.0), rep_variant)
+                        .on_hover_text("Ulangi (R)")
+                        .clicked()
+                    {
+                        self.toggle_repeat();
+                    }
+
+                    let shuf_variant = if self.shuffle {
+                        GlisseVariant::ActiveTint(GLASS_TERRACOTTA)
+                    } else {
+                        GlisseVariant::Glass
+                    };
+                    if glisse_button(ui, "shuffle_btn", "🔀", Vec2::new(32.0, 28.0), shuf_variant)
+                        .on_hover_text("Acak antrean (S)")
+                        .clicked()
+                    {
+                        self.toggle_shuffle();
+                    }
+
+                    ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                        let q_variant = if self.queue_open {
+                            GlisseVariant::ActiveTint(ACCENT_BRASS)
+                        } else {
+                            GlisseVariant::Glass
+                        };
+                        if glisse_button(ui, "queue_btn", "☰", Vec2::new(32.0, 28.0), q_variant)
+                            .on_hover_text("Antrean")
+                            .clicked()
+                        {
+                            self.queue_open = !self.queue_open;
+                        }
+
+                        ui.spacing_mut().slider_width = 76.0;
+                        if ui
+                            .add(
+                                egui::Slider::new(&mut self.volume, 0.0..=1.0)
+                                    .show_value(false)
+                                    .trailing_fill(true),
+                            )
+                            .changed()
+                        {
+                            self.media.set_volume(self.volume);
+                        }
+
+                        if self.current_track().is_some()
+                            && (snap.has_video || self.want_video)
+                        {
+                            let vid_v = if self.want_video {
+                                GlisseVariant::ActiveTint(STATUS_JADE)
+                            } else {
+                                GlisseVariant::Glass
+                            };
+                            if glisse_button(
+                                ui,
+                                "video_mode_btn",
+                                "Video",
+                                Vec2::new(54.0, 26.0),
+                                vid_v,
+                            )
+                            .on_hover_text("Mode Video")
+                            .clicked()
+                            {
+                                self.toggle_video_mode(snap, &ctx);
+                            }
+                        }
+                    });
+                });
+            });
+    }
+
+    fn render_main_body(&mut self, ui: &mut Ui) {
+        let ctx = ui.ctx().clone();
+
+        if let Some(st) = &self.status_text {
+            Frame::new()
+                .inner_margin(Margin::symmetric(14, 6))
+                .show(ui, |ui| {
+                    ui.label(RichText::new(st).size(12.0).color(ACCENT_GOLD));
+                });
+        }
+
+        egui::ScrollArea::vertical()
+            .auto_shrink([false, false])
+            .show(ui, |ui| {
+                Frame::new()
+                    .inner_margin(Margin::symmetric(14, 10))
+                    .show(ui, |ui| match self.view.clone() {
+                        ActiveView::Home => self.render_home_view(ui, &ctx),
+                        ActiveView::Search => self.render_tracks_list(ui, &ctx, None),
+                        ActiveView::Collection { title } => {
+                            self.render_tracks_list(ui, &ctx, Some(&title))
+                        }
+                    });
+            });
+    }
+
+    fn render_home_view(&mut self, ui: &mut Ui, ctx: &egui::Context) {
+        ui.horizontal(|ui| {
+            ui.vertical(|ui| {
+                ui.label(
+                    RichText::new("DISCOVER")
+                        .monospace()
+                        .size(10.0)
+                        .color(ACCENT_GOLD),
+                );
+                ui.label(
+                    RichText::new("Mau dengerin apa?")
+                        .strong()
+                        .size(19.0)
+                        .color(TEXT_MAIN),
+                );
+            });
+            ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                if glisse_button(
+                    ui,
+                    "refresh_home",
+                    "Refresh",
+                    Vec2::new(68.0, 26.0),
+                    GlisseVariant::Glass,
+                )
+                .clicked()
+                {
+                    self.load_home(ctx.clone());
+                }
+            });
+        });
+
+        ui.add_space(12.0);
+
+        let mut clicked_track_action: Option<(Vec<Track>, usize, bool)> = None;
+        let mut clicked_collection: Option<HomeItem> = None;
+        let mut covers_to_load: Vec<Option<String>> = Vec::new();
+
+        for shelf in &self.shelves {
+            ui.label(
+                RichText::new(shelf.title)
+                    .strong()
+                    .size(14.5)
+                    .color(TEXT_MAIN),
+            );
+            ui.label(RichText::new(shelf.subtitle).size(11.5).color(TEXT_MUTED));
+            ui.add_space(6.0);
+
+            if shelf.loading {
+                ui.horizontal(|ui| {
+                    for _ in 0..3 {
+                        let (r, _) =
+                            ui.allocate_exact_size(Vec2::new(118.0, 152.0), Sense::hover());
+                        ui.painter()
+                            .rect_filled(r, CornerRadius::same(10), SURFACE_CARD);
+                    }
+                });
+            } else if shelf.error.is_some() {
+                ui.label(
+                    RichText::new("Belum bisa dimuat. Coba Refresh.")
+                        .size(12.0)
+                        .color(TEXT_DIMMED),
+                );
+            } else if shelf.items.is_empty() {
+                ui.label(
+                    RichText::new("Belum ada rekomendasi tersedia.")
+                        .size(12.0)
+                        .color(TEXT_DIMMED),
+                );
+            } else {
+                egui::ScrollArea::horizontal()
+                    .id_salt(format!("shelf_{}", shelf.key))
+                    .show(ui, |ui| {
+                        ui.horizontal(|ui| {
+                            ui.spacing_mut().item_spacing.x = 10.0;
+                            for (idx, item) in shelf.items.iter().enumerate() {
+                                covers_to_load.push(item.cover.clone());
+                                let (card_rect, resp) = ui.allocate_exact_size(
+                                    Vec2::new(122.0, 162.0),
+                                    Sense::click(),
+                                );
+                                if resp.hovered() {
+                                    ui.ctx().set_cursor_icon(CursorIcon::PointingHand);
+                                }
+                                let bg = if resp.hovered() {
+                                    Color32::from_rgb(42, 42, 52)
+                                } else {
+                                    SURFACE_CARD
+                                };
+                                let painter = ui.painter();
+                                painter.rect_filled(card_rect, CornerRadius::same(10), bg);
+                                painter.rect_stroke(
+                                    card_rect,
+                                    CornerRadius::same(10),
+                                    Stroke::new(1.0, BORDER_SUBTLE),
+                                    StrokeKind::Inside,
+                                );
+
+                                let img_rect = Rect::from_min_size(
+                                    card_rect.min + Vec2::splat(8.0),
+                                    Vec2::splat(106.0),
+                                );
+                                if let Some(url) = &item.cover {
+                                    if let Some(tex) = self.covers.get(url) {
+                                        painter.image(
+                                            tex.id(),
+                                            img_rect,
+                                            Rect::from_min_max(Pos2::ZERO, Pos2::new(1.0, 1.0)),
+                                            Color32::WHITE,
+                                        );
+                                    } else {
+                                        painter.rect_filled(
+                                            img_rect,
+                                            CornerRadius::same(6),
+                                            SURFACE_PANEL,
+                                        );
+                                    }
+                                } else {
+                                    painter.rect_filled(
+                                        img_rect,
+                                        CornerRadius::same(6),
+                                        SURFACE_PANEL,
+                                    );
+                                }
+
+                                let text_rect = Rect::from_min_max(
+                                    Pos2::new(card_rect.left() + 8.0, img_rect.bottom() + 6.0),
+                                    Pos2::new(card_rect.right() - 8.0, card_rect.bottom() - 6.0),
+                                );
+                                let mut text_ui =
+                                    ui.new_child(egui::UiBuilder::new().max_rect(text_rect));
+                                text_ui.add(
+                                    egui::Label::new(
+                                        RichText::new(&item.name)
+                                            .strong()
+                                            .size(12.0)
+                                            .color(TEXT_MAIN),
+                                    )
+                                    .truncate(),
+                                );
+                                let sub = if item.artist.is_empty() {
+                                    item.kind.as_str()
+                                } else {
+                                    item.artist.as_str()
+                                };
+                                text_ui.add(
+                                    egui::Label::new(
+                                        RichText::new(sub).size(11.0).color(TEXT_MUTED),
+                                    )
+                                    .truncate(),
+                                );
+
+                                if resp.clicked() {
+                                    if item.kind == "track" {
+                                        let tracks: Vec<Track> = shelf
+                                            .items
+                                            .iter()
+                                            .filter(|i| i.kind == "track")
+                                            .map(|i| Track {
+                                                id: i.id.clone(),
+                                                name: i.name.clone(),
+                                                artist: i.artist.clone(),
+                                                duration: i.duration,
+                                                cover: i.cover.clone(),
+                                                video: i.video,
+                                            })
+                                            .collect();
+                                        let pos = tracks
+                                            .iter()
+                                            .position(|t| t.id == item.id)
+                                            .unwrap_or(idx);
+                                        clicked_track_action = Some((tracks, pos, item.video));
+                                    } else {
+                                        clicked_collection = Some(item.clone());
+                                    }
+                                }
+                            }
+                        });
+                    });
+            }
+
+            ui.add_space(16.0);
+        }
+
+        for cov in covers_to_load {
+            self.request_cover(&cov, ctx);
+        }
+        if let Some((tracks, idx, is_video)) = clicked_track_action {
+            self.want_video = is_video;
+            self.set_queue(tracks, idx);
+            self.start_current_track(0.0, true, ctx.clone());
+        } else if let Some(col) = clicked_collection {
+            self.open_collection(&col, ctx.clone());
+        }
+    }
+
+    fn render_tracks_list(
+        &mut self,
+        ui: &mut Ui,
+        ctx: &egui::Context,
+        collection_title: Option<&str>,
+    ) {
+        if let Some(title) = collection_title {
+            if glisse_button(
+                ui,
+                "back_home_btn",
+                "← Beranda",
+                Vec2::new(88.0, 28.0),
+                GlisseVariant::Glass,
+            )
+            .clicked()
+            {
+                self.load_home(ctx.clone());
+                return;
+            }
+            ui.add_space(6.0);
+            ui.label(RichText::new(title).strong().size(18.0).color(TEXT_MAIN));
+            ui.add_space(10.0);
+        }
+
+        if self.results.is_empty() && self.status_text.is_none() {
+            ui.add_space(28.0);
+            ui.vertical_centered(|ui| {
+                ui.label(
+                    RichText::new("Belum ada lagu di sini.")
+                        .size(13.0)
+                        .color(TEXT_DIMMED),
+                );
+            });
+            return;
+        }
+
+        let cur_id = self.current_track().map(|t| t.id.clone());
+        let tracks_snapshot = self.results.clone();
+        let mut clicked_idx: Option<usize> = None;
+
+        for (idx, track) in tracks_snapshot.iter().enumerate() {
+            self.request_cover(&track.cover, ctx);
+            let is_playing = cur_id.as_deref() == Some(track.id.as_str());
+
+            let row_w = ui.available_width();
+            let (rect, resp) = ui.allocate_exact_size(Vec2::new(row_w, 56.0), Sense::click());
+            if resp.hovered() {
+                ui.ctx().set_cursor_icon(CursorIcon::PointingHand);
+            }
+
+            let fill = if is_playing {
+                Color32::from_rgba_unmultiplied(217, 119, 6, 32)
+            } else if resp.hovered() {
+                SURFACE_CARD
+            } else {
+                Color32::TRANSPARENT
+            };
+            let painter = ui.painter();
+            painter.rect_filled(rect, CornerRadius::same(10), fill);
+            if is_playing {
+                painter.rect_stroke(
+                    rect,
+                    CornerRadius::same(10),
+                    Stroke::new(1.0, Color32::from_rgba_unmultiplied(245, 158, 11, 90)),
+                    StrokeKind::Inside,
+                );
+            }
+
+            let cov_rect =
+                Rect::from_min_size(Pos2::new(rect.left() + 8.0, rect.top() + 7.0), Vec2::splat(42.0));
+            if let Some(url) = &track.cover {
+                if let Some(tex) = self.covers.get(url) {
+                    painter.image(
+                        tex.id(),
+                        cov_rect,
+                        Rect::from_min_max(Pos2::ZERO, Pos2::new(1.0, 1.0)),
+                        Color32::WHITE,
+                    );
+                } else {
+                    painter.rect_filled(cov_rect, CornerRadius::same(6), SURFACE_CARD);
+                }
+            } else {
+                painter.rect_filled(cov_rect, CornerRadius::same(6), SURFACE_CARD);
+            }
+
+            let dur_str = track.duration.map(|d| format_time(d as f64)).unwrap_or_default();
+            painter.text(
+                Pos2::new(rect.right() - 10.0, rect.center().y),
+                egui::Align2::RIGHT_CENTER,
+                dur_str,
+                FontId::monospace(11.5),
+                TEXT_DIMMED,
+            );
+
+            let text_rect = Rect::from_min_max(
+                Pos2::new(cov_rect.right() + 10.0, rect.top() + 9.0),
+                Pos2::new(rect.right() - 52.0, rect.bottom() - 7.0),
+            );
+            let mut text_ui = ui.new_child(egui::UiBuilder::new().max_rect(text_rect));
+            let title_col = if is_playing { ACCENT_GOLD } else { TEXT_MAIN };
+            text_ui.add(
+                egui::Label::new(RichText::new(&track.name).strong().size(13.0).color(title_col))
+                    .truncate(),
+            );
+            text_ui.add(
+                egui::Label::new(RichText::new(&track.artist).size(11.5).color(TEXT_MUTED))
+                    .truncate(),
+            );
+
+            if resp.clicked() {
+                clicked_idx = Some(idx);
+            }
+            ui.add_space(2.0);
+        }
+
+        if let Some(idx) = clicked_idx {
+            let is_vid = tracks_snapshot.get(idx).map(|t| t.video).unwrap_or(false);
+            self.want_video = is_vid;
+            self.set_queue(tracks_snapshot, idx);
+            self.start_current_track(0.0, true, ctx.clone());
+        }
+    }
+
+    fn render_queue_drawer(&mut self, ctx: &egui::Context) {
+        if !self.queue_open {
+            return;
+        }
+        let screen = ctx.content_rect();
+        let drawer_w = 290.0f32.min(screen.width());
+        let drawer_rect = Rect::from_min_max(
+            Pos2::new(screen.right() - drawer_w, screen.top()),
+            screen.max,
+        );
+
+        egui::Area::new(Id::unique("queue_drawer"))
+            .order(Order::Foreground)
+            .fixed_pos(drawer_rect.min)
+            .show(ctx, |ui| {
+                ui.set_min_size(drawer_rect.size());
+                ui.set_max_size(drawer_rect.size());
+                Frame::new()
+                    .fill(Color32::from_rgba_unmultiplied(24, 24, 32, 246))
+                    .stroke(Stroke::new(1.0, BORDER_SUBTLE))
+                    .inner_margin(Margin::same(12))
+                    .show(ui, |ui| {
+                        ui.set_min_size(drawer_rect.size() - Vec2::splat(24.0));
+                        ui.horizontal(|ui| {
+                            ui.label(RichText::new("Antrean").strong().size(14.0).color(TEXT_MAIN));
+                            ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                                if glisse_button(
+                                    ui,
+                                    "queue_close_btn",
+                                    "✕",
+                                    Vec2::new(28.0, 28.0),
+                                    GlisseVariant::Glass,
+                                )
+                                .clicked()
+                                {
+                                    self.queue_open = false;
+                                }
+                            });
+                        });
+                        ui.add_space(8.0);
+                        ui.separator();
+                        ui.add_space(6.0);
+
+                        let mut jump_to: Option<usize> = None;
+                        let cur_idx = self.queue_index;
+                        egui::ScrollArea::vertical()
+                            .id_salt("queue_scroll")
+                            .max_height(drawer_rect.height() - 70.0)
+                            .show(ui, |ui| {
+                                for (i, t) in self.queue.iter().enumerate() {
+                                    let active = cur_idx == Some(i);
+                                    let (r, resp) = ui.allocate_exact_size(
+                                        Vec2::new(ui.available_width(), 44.0),
+                                        Sense::click(),
+                                    );
+                                    if resp.hovered() {
+                                        ui.ctx().set_cursor_icon(CursorIcon::PointingHand);
+                                    }
+                                    if active || resp.hovered() {
+                                        let c = if active {
+                                            Color32::from_rgba_unmultiplied(217, 119, 6, 38)
+                                        } else {
+                                            SURFACE_CARD
+                                        };
+                                        ui.painter().rect_filled(r, CornerRadius::same(8), c);
+                                    }
+                                    let mut row_ui = ui.new_child(
+                                        egui::UiBuilder::new().max_rect(r.shrink2(Vec2::new(8.0, 4.0))),
+                                    );
+                                    row_ui.add(
+                                        egui::Label::new(
+                                            RichText::new(&t.name)
+                                                .strong()
+                                                .size(12.0)
+                                                .color(if active { ACCENT_GOLD } else { TEXT_MAIN }),
+                                        )
+                                        .truncate(),
+                                    );
+                                    row_ui.add(
+                                        egui::Label::new(
+                                            RichText::new(&t.artist).size(11.0).color(TEXT_MUTED),
+                                        )
+                                        .truncate(),
+                                    );
+                                    if resp.clicked() {
+                                        jump_to = Some(i);
+                                    }
+                                }
+                            });
+
+                        if let Some(idx) = jump_to {
+                            self.queue_index = Some(idx);
+                            self.start_current_track(0.0, true, ctx.clone());
+                        }
+                    });
+            });
+    }
+
+    fn render_toast(&mut self, ctx: &egui::Context) {
+        let Some((msg, until)) = &self.toast else {
+            return;
+        };
+        if Instant::now() >= *until {
+            self.toast = None;
+            return;
+        }
+        let screen = ctx.content_rect();
+        egui::Area::new(Id::unique("toast_overlay"))
+            .order(Order::Tooltip)
+            .anchor(egui::Align2::CENTER_BOTTOM, Vec2::new(0.0, -138.0))
+            .constrain_to(screen)
+            .show(ctx, |ui| {
+                Frame::new()
+                    .fill(Color32::from_rgba_unmultiplied(34, 34, 43, 240))
+                    .stroke(Stroke::new(1.0, ACCENT_BRASS))
+                    .corner_radius(CornerRadius::same(99))
+                    .inner_margin(Margin::symmetric(14, 7))
+                    .show(ui, |ui| {
+                        ui.label(RichText::new(msg).size(12.0).color(TEXT_MAIN));
+                    });
+            });
+    }
+}
+
+impl eframe::App for NadaApp {
+    fn clear_color(&self, _visuals: &egui::Visuals) -> [f32; 4] {
+        BG_STUDIO.to_normalized_gamma_f32()
+    }
+
+    fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
+        let ctx = ui.ctx().clone();
+
+        // Intercept close button -> hide to tray while keeping audio playback alive
+        if ctx.input(|i| i.viewport().close_requested()) && !self.allow_quit.load(Ordering::Acquire)
+        {
+            ctx.send_viewport_cmd(ViewportCommand::CancelClose);
+            ctx.send_viewport_cmd(ViewportCommand::Visible(false));
+        }
+
+        let snap = self.media.snapshot();
+        self.process_events(&ctx, &snap);
+        self.handle_shortcuts(&ctx, &snap);
+
+        egui::Panel::top("nada_header")
+            .frame(Frame::NONE)
+            .show_separator_line(true)
+            .show(ui, |ui| {
+                self.render_header(ui);
+            });
+
+        egui::Panel::bottom("nada_player_dock")
+            .frame(Frame::NONE)
+            .show_separator_line(false)
+            .show(ui, |ui| {
+                if self.want_video && !self.pip_open {
+                    self.render_video_stage(ui);
+                }
+                self.render_player_dock(ui, &snap);
+            });
+
+        egui::CentralPanel::default()
+            .frame(Frame::new().fill(BG_STUDIO))
+            .show(ui, |ui| {
+                self.render_main_body(ui);
+            });
+
+        self.render_queue_drawer(&ctx);
+        self.render_toast(&ctx);
+        self.render_pip_viewport(&ctx, &snap);
+
+        if snap.playing || snap.loading {
+            ctx.request_repaint_after(Duration::from_millis(33));
+        } else {
+            ctx.request_repaint_after(Duration::from_millis(250));
+        }
+    }
+}
+
+fn configure_visuals(ctx: &egui::Context) {
+    let mut visuals = egui::Visuals::dark();
+    visuals.panel_fill = BG_STUDIO;
+    visuals.window_fill = SURFACE_PANEL;
+    visuals.override_text_color = Some(TEXT_MAIN);
+    visuals.selection.bg_fill = ACCENT_BRASS;
+    visuals.selection.stroke = Stroke::new(1.0, ACCENT_GOLD);
+    visuals.widgets.inactive.bg_fill = SURFACE_CARD;
+    visuals.widgets.hovered.bg_fill = Color32::from_rgb(52, 52, 64);
+    visuals.widgets.active.bg_fill = ACCENT_BRASS;
+    ctx.set_visuals(visuals);
+}
+
+pub fn format_time(secs: f64) -> String {
+    if !secs.is_finite() || secs <= 0.0 {
+        return "0:00".to_string();
+    }
+    let total = secs.floor() as u64;
+    let m = total / 60;
+    let s = total % 60;
+    format!("{m}:{s:02}")
+}
+
+fn simple_shuffle<T>(slice: &mut [T]) {
+    let mut seed = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_nanos() as u64)
+        .unwrap_or(0x9e3779b97f4a7c15);
+    for i in (1..slice.len()).rev() {
+        seed ^= seed << 13;
+        seed ^= seed >> 7;
+        seed ^= seed << 17;
+        let j = (seed as usize) % (i + 1);
+        slice.swap(i, j);
+    }
+}
+
+// Keep unused shape/button imports warning-free
+#[allow(dead_code)]
+fn _touch_types(_: Shape, _: PointerButton) {}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn format_time_renders_mm_ss() {
+        assert_eq!(format_time(0.0), "0:00");
+        assert_eq!(format_time(64.9), "1:04");
+        assert_eq!(format_time(233.0), "3:53");
+    }
+}

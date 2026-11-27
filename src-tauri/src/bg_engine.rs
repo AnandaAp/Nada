@@ -1,7 +1,7 @@
 use serde_json::Value;
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
-use std::sync::{mpsc, Arc, Condvar, Mutex};
+use std::sync::{mpsc, Arc, Mutex};
 use std::time::{Duration, Instant};
 
 const BG_USER_AGENT_FALLBACK: &str =
@@ -178,125 +178,473 @@ pub fn parse_sync_json_result(raw: &str) -> Result<Value, String> {
     Ok(val)
 }
 
-pub struct TauriJsHost {
-    window: tauri::WebviewWindow,
-    loaded: Arc<(Mutex<bool>, Condvar)>,
-    bridge: CallbackBridge,
+const QUICKJS_POLYFILLS: &str = r#"
+(() => {
+  const g = globalThis;
+  g.window = g;
+  g.self = g;
+  g.top = g;
+  g.parent = g;
+  g.location = {
+    href: "https://www.youtube.com/robots.txt",
+    origin: "https://www.youtube.com",
+    protocol: "https:",
+    host: "www.youtube.com",
+    hostname: "www.youtube.com",
+    pathname: "/robots.txt",
+    search: "",
+    hash: "",
+    toString() { return this.href; }
+  };
+  g.navigator = {
+    userAgent: "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36",
+    language: "en-US",
+    languages: ["en-US", "en"],
+    platform: "Win32",
+    vendor: "Google Inc.",
+    onLine: true,
+    hardwareConcurrency: 8,
+    deviceMemory: 8,
+    webdriver: false,
+    maxTouchPoints: 0,
+    cookieEnabled: true
+  };
+  g.screen = { width: 1920, height: 1080, availWidth: 1920, availHeight: 1040, colorDepth: 24, pixelDepth: 24 };
+  g.devicePixelRatio = 1;
+  g.innerWidth = 430;
+  g.innerHeight = 640;
+  g.outerWidth = 430;
+  g.outerHeight = 640;
+  g.performance = {
+    timeOrigin: Date.now(),
+    now() { return Date.now() - this.timeOrigin; }
+  };
+  function makeEl(tag) {
+    return {
+      tagName: String(tag || "DIV").toUpperCase(),
+      nodeType: 1,
+      style: {},
+      children: [],
+      childNodes: [],
+      dataset: {},
+      appendChild(c) { this.children.push(c); return c; },
+      removeChild(c) { return c; },
+      insertBefore(c) { this.children.push(c); return c; },
+      setAttribute(k, v) { this[k] = v; },
+      getAttribute(k) { return this[k] ?? null; },
+      removeAttribute(k) { delete this[k]; },
+      addEventListener() {},
+      removeEventListener() {},
+      getElementsByTagName() { return []; },
+      querySelector() { return null; },
+      querySelectorAll() { return []; },
+      cloneNode() { return makeEl(tag); },
+      getContext() {
+        return {
+          fillRect() {}, clearRect() {}, getImageData() { return { data: new Uint8ClampedArray(16) }; },
+          putImageData() {}, fillText() {}, measureText() { return { width: 10 }; },
+          beginPath() {}, arc() {}, fill() {}, stroke() {}, closePath() {}
+        };
+      },
+      toDataURL() { return "data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNk+M9QDwADhgGAWjR9awAAAABJRU5ErkJggg=="; }
+    };
+  }
+  const docEl = makeEl("html");
+  const headEl = makeEl("head");
+  const bodyEl = makeEl("body");
+  g.document = {
+    nodeType: 9,
+    readyState: "complete",
+    URL: g.location.href,
+    documentURI: g.location.href,
+    domain: "www.youtube.com",
+    referrer: "",
+    cookie: "",
+    title: "",
+    hidden: false,
+    visibilityState: "visible",
+    location: g.location,
+    documentElement: docEl,
+    head: headEl,
+    body: bodyEl,
+    createElement(t) { return makeEl(t); },
+    createElementNS(_ns, t) { return makeEl(t); },
+    createTextNode(t) { return { nodeType: 3, textContent: String(t) }; },
+    createDocumentFragment() { return makeEl("fragment"); },
+    createEvent() { return { initEvent() {} }; },
+    getElementById() { return null; },
+    getElementsByTagName(t) {
+      const u = String(t || "").toLowerCase();
+      if (u === "head") return [headEl];
+      if (u === "body") return [bodyEl];
+      return [];
+    },
+    getElementsByClassName() { return []; },
+    querySelector(s) {
+      if (s === "head") return headEl;
+      if (s === "body") return bodyEl;
+      return null;
+    },
+    querySelectorAll() { return []; },
+    addEventListener() {},
+    removeEventListener() {}
+  };
+  g.Element = function Element() {};
+  g.HTMLElement = function HTMLElement() {};
+  g.Node = function Node() {};
+  g.Event = function Event(t) { this.type = t; };
+  g.CustomEvent = function CustomEvent(t, o) { this.type = t; this.detail = o && o.detail; };
+  g.MutationObserver = function MutationObserver() { this.observe = () => {}; this.disconnect = () => {}; };
+  g.XMLHttpRequest = function XMLHttpRequest() {};
+  g.addEventListener = function () {};
+  g.removeEventListener = function () {};
+  g.postMessage = function () {};
+  g.setTimeout = function (fn) {
+    if (typeof fn === "function") Promise.resolve().then(() => { try { fn(); } catch (_) {} });
+    return 1;
+  };
+  g.clearTimeout = function () {};
+  g.setInterval = function () { return 1; };
+  g.clearInterval = function () {};
+  g.requestAnimationFrame = function (fn) {
+    if (typeof fn === "function") Promise.resolve().then(() => { try { fn(g.performance.now()); } catch (_) {} });
+    return 1;
+  };
+  g.cancelAnimationFrame = function () {};
+
+  const B64 = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+  g.btoa = function btoa(str) {
+    const s = String(str);
+    let out = "";
+    for (let i = 0; i < s.length; i += 3) {
+      const c1 = s.charCodeAt(i) & 0xff;
+      const h2 = i + 1 < s.length;
+      const h3 = i + 2 < s.length;
+      const c2 = h2 ? (s.charCodeAt(i + 1) & 0xff) : 0;
+      const c3 = h3 ? (s.charCodeAt(i + 2) & 0xff) : 0;
+      const n = (c1 << 16) | (c2 << 8) | c3;
+      out += B64[(n >> 18) & 63] + B64[(n >> 12) & 63] + (h2 ? B64[(n >> 6) & 63] : "=") + (h3 ? B64[n & 63] : "=");
+    }
+    return out;
+  };
+  g.atob = function atob(input) {
+    let s = String(input).replace(/[\t\n\f\r ]+/g, "");
+    if (s.length % 4 === 1) throw new Error("Invalid base64");
+    let out = "";
+    let bc = 0, bs = 0;
+    for (let i = 0; i < s.length; i++) {
+      const ch = s.charAt(i);
+      if (ch === "=") break;
+      const idx = B64.indexOf(ch);
+      if (idx < 0) continue;
+      bs = bc % 4 ? bs * 64 + idx : idx;
+      if (bc++ % 4) out += String.fromCharCode(255 & (bs >> ((-2 * bc) & 6)));
+    }
+    return out;
+  };
+
+  g.TextEncoder = class TextEncoder {
+    encode(str = "") {
+      const s = String(str);
+      const bytes = [];
+      for (let i = 0; i < s.length; i++) {
+        let code = s.charCodeAt(i);
+        if (code < 0x80) {
+          bytes.push(code);
+        } else if (code < 0x800) {
+          bytes.push(0xc0 | (code >> 6), 0x80 | (code & 0x3f));
+        } else if (code >= 0xd800 && code <= 0xdbff && i + 1 < s.length) {
+          const low = s.charCodeAt(++i);
+          const cp = ((code - 0xd800) << 10) + (low - 0xdc00) + 0x10000;
+          bytes.push(0xf0 | (cp >> 18), 0x80 | ((cp >> 12) & 0x3f), 0x80 | ((cp >> 6) & 0x3f), 0x80 | (cp & 0x3f));
+        } else {
+          bytes.push(0xe0 | (code >> 12), 0x80 | ((code >> 6) & 0x3f), 0x80 | (code & 0x3f));
+        }
+      }
+      return new Uint8Array(bytes);
+    }
+  };
+
+  g.TextDecoder = class TextDecoder {
+    decode(input) {
+      if (!input) return "";
+      const bytes = input instanceof Uint8Array ? input : new Uint8Array(input.buffer || input);
+      let out = "";
+      let i = 0;
+      while (i < bytes.length) {
+        const b1 = bytes[i++];
+        if (b1 < 0x80) {
+          out += String.fromCharCode(b1);
+        } else if ((b1 & 0xe0) === 0xc0) {
+          const b2 = bytes[i++] & 0x3f;
+          out += String.fromCharCode(((b1 & 0x1f) << 6) | b2);
+        } else if ((b1 & 0xf0) === 0xe0) {
+          const b2 = bytes[i++] & 0x3f;
+          const b3 = bytes[i++] & 0x3f;
+          out += String.fromCharCode(((b1 & 0x0f) << 12) | (b2 << 6) | b3);
+        } else {
+          const b2 = bytes[i++] & 0x3f;
+          const b3 = bytes[i++] & 0x3f;
+          const b4 = bytes[i++] & 0x3f;
+          const cp = (((b1 & 0x07) << 18) | (b2 << 12) | (b3 << 6) | b4) - 0x10000;
+          out += String.fromCharCode(0xd800 + (cp >> 10), 0xdc00 + (cp & 0x3ff));
+        }
+      }
+      return out;
+    }
+  };
+
+  if (!g.crypto) {
+    g.crypto = {
+      getRandomValues(arr) {
+        for (let i = 0; i < arr.length; i++) arr[i] = Math.floor(Math.random() * 256);
+        return arr;
+      }
+    };
+  }
+
+  g.fetch = async function fetch(url, init) {
+    const reqObj = {
+      url: String(url),
+      method: (init && init.method) ? String(init.method) : "GET",
+      headers: (init && init.headers) ? init.headers : {},
+      body: (init && init.body != null) ? String(init.body) : null
+    };
+    const rawResp = g.__nada_native_fetch(JSON.stringify(reqObj));
+    const parsed = JSON.parse(rawResp);
+    if (!parsed.ok_transport) {
+      throw new Error(parsed.error || "fetch transport error");
+    }
+    const status = parsed.status || 200;
+    const textBody = parsed.body || "";
+    return {
+      ok: status >= 200 && status < 300,
+      status,
+      url: String(url),
+      async text() { return textBody; },
+      async json() { return JSON.parse(textBody); }
+    };
+  };
+})();
+"#;
+
+enum QjsCmd {
+    EvalAsync(String, Duration, mpsc::Sender<Result<Value, String>>),
+    EvalSync(String, Duration, mpsc::Sender<Result<Value, String>>),
 }
 
-impl TauriJsHost {
-    pub fn new(
-        window: tauri::WebviewWindow,
-        loaded: Arc<(Mutex<bool>, Condvar)>,
-    ) -> Result<Self, String> {
-        Ok(Self {
-            window,
-            loaded,
-            bridge: CallbackBridge::start()?,
-        })
+pub struct QuickJsHost {
+    tx: mpsc::Sender<QjsCmd>,
+}
+
+fn execute_native_fetch(client: &reqwest::blocking::Client, req_json: String) -> String {
+    let parsed: Value = match serde_json::from_str(&req_json) {
+        Ok(v) => v,
+        Err(e) => {
+            return serde_json::json!({
+                "ok_transport": false,
+                "error": format!("invalid fetch req json: {e}")
+            })
+            .to_string();
+        }
+    };
+    let url = parsed.get("url").and_then(Value::as_str).unwrap_or("");
+    let method = parsed
+        .get("method")
+        .and_then(Value::as_str)
+        .unwrap_or("GET");
+    let mut builder = match method.to_ascii_uppercase().as_str() {
+        "POST" => client.post(url),
+        "HEAD" => client.head(url),
+        "OPTIONS" => client.request(reqwest::Method::OPTIONS, url),
+        _ => client.get(url),
+    };
+    builder = builder
+        .header(reqwest::header::USER_AGENT, BG_USER_AGENT_FALLBACK)
+        .header(reqwest::header::ORIGIN, "https://www.youtube.com")
+        .header(reqwest::header::REFERER, "https://www.youtube.com/");
+
+    if let Some(hdrs) = parsed.get("headers").and_then(Value::as_object) {
+        for (k, v) in hdrs {
+            if let Some(vs) = v.as_str() {
+                builder = builder.header(k.as_str(), vs);
+            }
+        }
+    }
+    if let Some(body) = parsed.get("body").and_then(Value::as_str) {
+        builder = builder.body(body.to_string());
     }
 
-    fn wait_ready(&self, timeout: Duration) -> Result<(), String> {
-        let started = Instant::now();
-        let deadline = started + timeout;
-        let mut last_nav_attempt: Option<Instant> = None;
-        let (lock, cvar) = &*self.loaded;
-        let mut guard = lock.lock().unwrap();
-        while !*guard {
-            let now = Instant::now();
-            if now >= deadline {
-                return Err("timed out waiting for bg_worker WebView2 page load".to_string());
-            }
-            let step = (deadline - now).min(Duration::from_millis(500));
-            let (g, _) = cvar.wait_timeout(guard, step).unwrap();
-            guard = g;
-            if *guard {
-                break;
-            }
-            drop(guard);
-            // Fallback probe in case page load finished before listener observed it,
-            // or recover if initial startup navigation landed on an offline error page.
-            let (tx, rx) = mpsc::channel();
-            let cell = Arc::new(Mutex::new(Some(tx)));
-            if self
-                .window
-                .eval_with_callback(
-                    "(() => ({ ready: document.readyState === 'complete', host: String(location.hostname || '') }))()",
-                    move |res| {
-                        if let Some(s) = cell.lock().unwrap().take() {
-                            let _ = s.send(res);
-                        }
-                    },
-                )
-                .is_ok()
-            {
-                if let Ok(raw) = rx.recv_timeout(Duration::from_millis(250)) {
-                    if let Ok(val) = parse_sync_json_result(&raw) {
-                        let ready = val.get("ready").and_then(Value::as_bool).unwrap_or(false);
-                        let host = val.get("host").and_then(Value::as_str).unwrap_or("");
-                        if ready && host.ends_with("youtube.com") {
-                            let mut g2 = lock.lock().unwrap();
-                            *g2 = true;
-                            cvar.notify_all();
-                            return Ok(());
-                        }
-                        let should_retry_nav = !host.ends_with("youtube.com")
-                            && ((ready
-                                && last_nav_attempt
-                                    .is_none_or(|t| t.elapsed() >= Duration::from_secs(3)))
-                                || (!ready
-                                    && started.elapsed() >= Duration::from_secs(10)
-                                    && last_nav_attempt
-                                        .is_none_or(|t| t.elapsed() >= Duration::from_secs(8))));
-                        if should_retry_nav {
-                            if let Ok(url) = "https://www.youtube.com/robots.txt".parse() {
-                                let _ = self.window.navigate(url);
-                                last_nav_attempt = Some(Instant::now());
+    match builder.send() {
+        Ok(resp) => {
+            let status = resp.status().as_u16();
+            let body = resp.text().unwrap_or_default();
+            serde_json::json!({
+                "ok_transport": true,
+                "status": status,
+                "body": body
+            })
+            .to_string()
+        }
+        Err(e) => serde_json::json!({
+            "ok_transport": false,
+            "error": e.to_string()
+        })
+        .to_string(),
+    }
+}
+
+impl QuickJsHost {
+    pub fn start() -> Result<Self, String> {
+        let (tx, rx) = mpsc::channel::<QjsCmd>();
+        let (init_tx, init_rx) = mpsc::channel::<Result<(), String>>();
+
+        std::thread::Builder::new()
+            .name("nada-qjs-host".to_string())
+            .stack_size(8 * 1024 * 1024)
+            .spawn(move || {
+                let bridge = match CallbackBridge::start() {
+                    Ok(b) => b,
+                    Err(e) => {
+                        let _ = init_tx.send(Err(e));
+                        return;
+                    }
+                };
+                let http = match reqwest::blocking::Client::builder()
+                    .connect_timeout(Duration::from_secs(10))
+                    .timeout(Duration::from_secs(20))
+                    .build()
+                {
+                    Ok(c) => c,
+                    Err(e) => {
+                        let _ = init_tx.send(Err(e.to_string()));
+                        return;
+                    }
+                };
+                let rt = match rquickjs::Runtime::new() {
+                    Ok(r) => r,
+                    Err(e) => {
+                        let _ = init_tx.send(Err(format!("QuickJS runtime init failed: {e}")));
+                        return;
+                    }
+                };
+                rt.set_max_stack_size(4 * 1024 * 1024);
+                let ctx = match rquickjs::Context::full(&rt) {
+                    Ok(c) => c,
+                    Err(e) => {
+                        let _ = init_tx.send(Err(format!("QuickJS context init failed: {e}")));
+                        return;
+                    }
+                };
+
+                let poly_res: Result<(), String> = ctx.with(|ctx| {
+                    let http_cl = http.clone();
+                    let fetch_fn = rquickjs::Function::new(ctx.clone(), move |req_json: String| {
+                        execute_native_fetch(&http_cl, req_json)
+                    })
+                    .map_err(|e| format!("QuickJS bind fetch failed: {e}"))?;
+                    ctx.globals()
+                        .set("__nada_native_fetch", fetch_fn)
+                        .map_err(|e| format!("QuickJS set fetch failed: {e}"))?;
+                    let mut opts = rquickjs::context::EvalOptions::default();
+                    opts.strict = false;
+                    ctx.eval_with_options::<(), _>(QUICKJS_POLYFILLS.as_bytes(), opts)
+                        .map_err(|e| format!("QuickJS polyfill eval failed: {e}"))?;
+                    Ok(())
+                });
+
+                if let Err(e) = poly_res {
+                    let _ = init_tx.send(Err(e));
+                    return;
+                }
+                let _ = init_tx.send(Ok(()));
+
+                while let Ok(cmd) = rx.recv() {
+                    match cmd {
+                        QjsCmd::EvalAsync(script_body, timeout, reply) => {
+                            let (req_id, cb_url, cb_rx) = bridge.register();
+                            let wrapped = wrap_async_script(&script_body, &cb_url);
+                            let eval_res: Result<(), String> = ctx.with(|ctx| {
+                                let mut opts = rquickjs::context::EvalOptions::default();
+                                opts.strict = false;
+                                ctx.eval_with_options::<rquickjs::Value<'_>, _>(
+                                    wrapped.as_bytes(),
+                                    opts,
+                                )
+                                .map(|_| ())
+                                .map_err(|e| format!("QuickJS async eval error: {e}"))
+                            });
+                            if let Err(e) = eval_res {
+                                bridge.cancel(&req_id);
+                                let _ = reply.send(Err(e));
+                                continue;
                             }
+                            let deadline = Instant::now() + timeout;
+                            loop {
+                                match rt.execute_pending_job() {
+                                    Ok(true) => continue,
+                                    Ok(false) => {}
+                                    Err(_) => {}
+                                }
+                                if let Ok(raw) = cb_rx.try_recv() {
+                                    let _ = reply.send(unwrap_callback_payload(&raw));
+                                    break;
+                                }
+                                if Instant::now() >= deadline {
+                                    bridge.cancel(&req_id);
+                                    let _ = reply.send(Err(
+                                        "QuickJS async callback timed out".to_string(),
+                                    ));
+                                    break;
+                                }
+                                std::thread::sleep(Duration::from_millis(5));
+                            }
+                        }
+                        QjsCmd::EvalSync(expr, _timeout, reply) => {
+                            let wrapped = format!("JSON.stringify({expr})");
+                            let res: Result<Value, String> = ctx.with(|ctx| {
+                                let mut opts = rquickjs::context::EvalOptions::default();
+                                opts.strict = false;
+                                let s: String = ctx
+                                    .eval_with_options(wrapped.as_bytes(), opts)
+                                    .map_err(|e| format!("QuickJS sync eval error: {e}"))?;
+                                parse_sync_json_result(&s)
+                            });
+                            while let Ok(true) = rt.execute_pending_job() {}
+                            let _ = reply.send(res);
                         }
                     }
                 }
-            }
-            guard = lock.lock().unwrap();
-        }
-        Ok(())
+            })
+            .map_err(|e| format!("failed to spawn QuickJsHost thread: {e}"))?;
+
+        init_rx
+            .recv_timeout(Duration::from_secs(10))
+            .map_err(|e| format!("QuickJsHost init timeout: {e}"))??;
+
+        Ok(Self { tx })
     }
 }
 
-impl JsHost for TauriJsHost {
+impl JsHost for QuickJsHost {
     fn eval_async_json(&self, script_body: &str, timeout: Duration) -> Result<Value, String> {
-        self.wait_ready(Duration::from_secs(30))?;
-        let (req_id, cb_url, rx) = self.bridge.register();
-        let wrapped = wrap_async_script(script_body, &cb_url);
-        if let Err(e) = self.window.eval(&wrapped) {
-            self.bridge.cancel(&req_id);
-            return Err(format!("webview eval failed: {e}"));
-        }
-        let raw = match rx.recv_timeout(timeout) {
-            Ok(s) => s,
-            Err(e) => {
-                self.bridge.cancel(&req_id);
-                return Err(format!("webview async callback timeout: {e}"));
-            }
-        };
-        unwrap_callback_payload(&raw)
+        let (reply_tx, reply_rx) = mpsc::channel();
+        self.tx
+            .send(QjsCmd::EvalAsync(script_body.to_string(), timeout, reply_tx))
+            .map_err(|e| format!("QuickJsHost send failed: {e}"))?;
+        reply_rx
+            .recv_timeout(timeout + Duration::from_secs(2))
+            .map_err(|e| format!("QuickJsHost async recv timeout: {e}"))?
     }
 
     fn eval_sync_json(&self, expr: &str, timeout: Duration) -> Result<Value, String> {
-        self.wait_ready(Duration::from_secs(30))?;
-        let (tx, rx) = mpsc::channel();
-        let cell = Arc::new(Mutex::new(Some(tx)));
-        self.window
-            .eval_with_callback(expr, move |res| {
-                if let Some(s) = cell.lock().unwrap().take() {
-                    let _ = s.send(res);
-                }
-            })
-            .map_err(|e| format!("webview eval_with_callback failed: {e}"))?;
-        let raw = rx
-            .recv_timeout(timeout)
-            .map_err(|e| format!("webview sync callback timeout: {e}"))?;
-        parse_sync_json_result(&raw)
+        let (reply_tx, reply_rx) = mpsc::channel();
+        self.tx
+            .send(QjsCmd::EvalSync(expr.to_string(), timeout, reply_tx))
+            .map_err(|e| format!("QuickJsHost send failed: {e}"))?;
+        reply_rx
+            .recv_timeout(timeout + Duration::from_secs(2))
+            .map_err(|e| format!("QuickJsHost sync recv timeout: {e}"))?
     }
 }
 

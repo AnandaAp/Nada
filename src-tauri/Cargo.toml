@@ -5,22 +5,31 @@ description = "Lightweight ad-free YouTube Music client"
 edition = "2021"
 
 [build-dependencies]
-tauri-build = { version = "2", features = [] }
+
+[target.'cfg(windows)'.build-dependencies]
+winres = "0.1"
 
 [dependencies]
-tauri = { version = "2", features = ["tray-icon", "image-png"] }
+eframe = { version = "0.37", default-features = false, features = ["default_fonts", "glow", "wayland", "x11", "clipboard"] }
+egui = "0.37"
+tray-icon = "0.27"
+single-instance = "0.3"
+dirs = "7"
+image = { version = "0.25", default-features = false, features = ["png", "jpeg", "webp"] }
+rodio = { version = "0.23", default-features = false, features = ["playback"] }
+symphonia = { version = "0.6", default-features = false, features = ["aac", "isomp4", "mkv", "ogg", "pcm", "vorbis", "wav", "opt-simd"] }
+symphonia-core = "0.6"
+symphonia-opus = "0.1"
+rust_h264 = "0.6"
+rquickjs = "0.9"
+base64 = "0.23"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 # Includes the upstream visitor-data panic fix not yet published on crates.io.
 rustypipe = { git = "https://codeberg.org/ThetaDev/rustypipe", rev = "71712e4eda5d78516fa9a5a7c3ab85daf1dc0bbc", default-features = false, features = ["rustls-tls-webpki-roots"] }
 tokio = { version = "1", features = ["rt-multi-thread", "macros", "net", "io-util", "sync", "time"] }
 tiny_http = "0.12"
-reqwest = { version = "0.12", default-features = false, features = ["blocking", "rustls-tls"] }
-tauri-plugin-single-instance = "2"
-
-[dev-dependencies]
-wry = "0.57"
-tao = "0.37"
+reqwest = { version = "0.12", default-features = false, features = ["blocking", "rustls-tls", "json"] }
 
 [profile.release]
 codegen-units = 1

@@ -37,5 +37,14 @@ fn main() {
         println!("cargo:rustc-env=NADA_JNN_KEY={key}");
     }
 
-    tauri_build::build()
+    #[cfg(windows)]
+    {
+        let icon_path = Path::new(env!("CARGO_MANIFEST_DIR")).join("icons/icon.ico");
+        println!("cargo:rerun-if-changed={}", icon_path.display());
+        if icon_path.exists() {
+            let mut res = winres::WindowsResource::new();
+            res.set_icon(icon_path.to_str().unwrap_or("icons/icon.ico"));
+            let _ = res.compile();
+        }
+    }
 }

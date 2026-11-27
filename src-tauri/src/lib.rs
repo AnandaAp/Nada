@@ -1,73 +1,75 @@
-use serde::Serialize;
-use tauri::{
-    menu::{Menu, MenuItem},
-    tray::{MouseButton, MouseButtonState, TrayIconBuilder, TrayIconEvent},
-    Emitter, Manager, State,
-};
+use std::path::PathBuf;
+use std::sync::atomic::AtomicBool;
+use std::sync::{mpsc, Arc};
+
 use rustypipe::client::{ClientType, RustyPipe};
 use rustypipe::model::{TrackItem, TrackType};
 use rustypipe::param::{Country, Language};
+use serde::Serialize;
 use serde_json::Value;
-
-use std::sync::{Arc, Condvar, Mutex};
+use single_instance::SingleInstance;
+use tray_icon::menu::{Menu, MenuEvent, MenuItem};
+use tray_icon::{Icon, MouseButton, MouseButtonState, TrayIconBuilder, TrayIconEvent};
 
 pub mod bg_engine;
+pub mod media;
 pub mod proxy;
 pub mod streams;
+pub mod ui;
 
-struct AppState {
-    rp: RustyPipe,
-    proxy: proxy::StreamProxy,
-    bg: Arc<bg_engine::BgEngine>,
+pub struct Backend {
+    pub rp: RustyPipe,
+    pub proxy: proxy::StreamProxy,
+    pub bg: Arc<bg_engine::BgEngine>,
 }
 
-#[derive(Serialize, Clone)]
-struct Track {
-    id: String,
-    name: String,
-    artist: String,
-    duration: Option<u32>,
-    cover: Option<String>,
-    video: bool,
+#[derive(Serialize, Clone, Debug)]
+pub struct Track {
+    pub id: String,
+    pub name: String,
+    pub artist: String,
+    pub duration: Option<u32>,
+    pub cover: Option<String>,
+    pub video: bool,
 }
 
-#[derive(Serialize)]
-struct HomeSection {
-    items: Vec<HomeItem>,
+#[derive(Serialize, Clone, Debug)]
+pub struct HomeSection {
+    pub items: Vec<HomeItem>,
 }
 
-#[derive(Serialize)]
-struct HomeItem {
-    id: String,
-    name: String,
-    artist: String,
-    cover: Option<String>,
-    kind: String,
-    duration: Option<u32>,
-    video: bool,
+#[derive(Serialize, Clone, Debug)]
+pub struct HomeItem {
+    pub id: String,
+    pub name: String,
+    pub artist: String,
+    pub cover: Option<String>,
+    pub kind: String,
+    pub duration: Option<u32>,
+    pub video: bool,
 }
 
-#[derive(Serialize)]
-struct AudioOption {
-    url: String,
-    mime: String,
-    bitrate: u32,
+#[derive(Serialize, Clone, Debug)]
+pub struct AudioOption {
+    pub url: String,
+    pub mime: String,
+    pub bitrate: u32,
 }
 
-#[derive(Serialize)]
-struct VideoOption {
-    url: String,
-    mime: String,
-    quality: String,
-    height: u32,
+#[derive(Serialize, Clone, Debug)]
+pub struct VideoOption {
+    pub url: String,
+    pub mime: String,
+    pub quality: String,
+    pub height: u32,
 }
 
-#[derive(Serialize)]
-struct StreamsResponse {
-    muxed: Vec<VideoOption>,
-    video_only: Vec<VideoOption>,
-    audio: Vec<AudioOption>,
-    expires_in_seconds: u32,
+#[derive(Serialize, Clone, Debug)]
+pub struct StreamsResponse {
+    pub muxed: Vec<VideoOption>,
+    pub video_only: Vec<VideoOption>,
+    pub audio: Vec<AudioOption>,
+    pub expires_in_seconds: u32,
 }
 
 fn pick_cover(thumbs: &[rustypipe::model::Thumbnail]) -> Option<String> {
@@ -119,7 +121,7 @@ fn community_shelf(value: &Value) -> Option<&Value> {
     }
 }
 
-fn parse_community_home(value: &Value) -> Result<Vec<HomeItem>, String> {
+pub fn parse_community_home(value: &Value) -> Result<Vec<HomeItem>, String> {
     let shelf = community_shelf(value)
         .ok_or_else(|| "Trending community playlists shelf not found".to_string())?;
     let cards = shelf
@@ -167,259 +169,398 @@ fn parse_community_home(value: &Value) -> Result<Vec<HomeItem>, String> {
         .collect())
 }
 
-#[tauri::command]
-async fn home_section(
-    state: State<'_, AppState>,
-    section: String,
-) -> Result<HomeSection, String> {
-    let q = state
-        .rp
-        .query()
-        .unauthenticated()
-        .lang(Language::En)
-        .country(Country::Id);
-    let items = match section.as_str() {
-        "community" => {
-            let raw = q
-                .raw(
-                    ClientType::DesktopMusic,
-                    "browse",
-                    &serde_json::json!({ "browseId": "FEmusic_home" }),
-                )
+impl Backend {
+    pub fn init(storage_dir: PathBuf) -> Result<Self, String> {
+        std::fs::create_dir_all(&storage_dir).map_err(|e| e.to_string())?;
+        let cache_dir = storage_dir.join("stream_cache");
+        let _ = std::fs::remove_dir_all(&cache_dir);
+        std::fs::create_dir_all(&cache_dir).map_err(|e| e.to_string())?;
+        let proxy_log = storage_dir.join("proxy.log");
+        let proxy = proxy::StreamProxy::start(proxy_log, cache_dir)?;
+        let rp = RustyPipe::builder()
+            .storage_dir(storage_dir)
+            .build()
+            .map_err(|e| e.to_string())?;
+        let host = Arc::new(bg_engine::QuickJsHost::start()?);
+        let bg = Arc::new(bg_engine::BgEngine::new(host)?);
+
+        Ok(Self { rp, proxy, bg })
+    }
+
+    pub async fn home_section(&self, section: &str) -> Result<HomeSection, String> {
+        let q = self
+            .rp
+            .query()
+            .unauthenticated()
+            .lang(Language::En)
+            .country(Country::Id);
+        let items = match section {
+            "community" => {
+                let raw = q
+                    .raw(
+                        ClientType::DesktopMusic,
+                        "browse",
+                        &serde_json::json!({ "browseId": "FEmusic_home" }),
+                    )
+                    .await
+                    .map_err(|e| e.to_string())?;
+                let value: Value = serde_json::from_str(&raw).map_err(|e| e.to_string())?;
+                parse_community_home(&value)?
+            }
+            "releases" => q
+                .music_new_albums()
                 .await
-                .map_err(|e| e.to_string())?;
-            let value: Value = serde_json::from_str(&raw).map_err(|e| e.to_string())?;
-            parse_community_home(&value)?
-        }
-        "releases" => q
-            .music_new_albums()
-            .await
-            .map_err(|e| e.to_string())?
-            .iter()
-            .take(8)
-            .map(|album| HomeItem {
-                id: album.id.clone(),
-                name: album.name.clone(),
-                artist: album
-                    .artists
-                    .iter()
-                    .map(|artist| artist.name.as_str())
-                    .collect::<Vec<_>>()
-                    .join(", "),
-                cover: pick_cover(&album.cover),
-                kind: "album".to_string(),
-                duration: None,
-                video: false,
-            })
-            .collect(),
-        "indonesia" | "international" => {
-            let region = if section == "indonesia" {
-                Country::Id
-            } else {
-                Country::Zz
-            };
-            let charts = q.music_charts(Some(region)).await.map_err(|e| e.to_string())?;
-            let name = if region == Country::Id {
-                "Daily Top Music Videos - Indonesia"
-            } else {
-                "Daily Top Music Videos - Global"
-            };
-            let playlist = charts.playlists.iter().find(|playlist| playlist.name == name)
-                .ok_or_else(|| format!("Daily chart playlist unavailable: {name}"))?;
-            q.music_playlist(&playlist.id).await.map_err(|e| e.to_string())?
-                .tracks.items.iter()
-                .filter(|track| track.track_type != TrackType::Episode)
+                .map_err(|e| e.to_string())?
+                .iter()
                 .take(8)
-                .map(|track| {
-                    // Daily video charts also provide playable audio streams.
-                    let track = map_track(track, false);
-                    HomeItem {
-                        id: track.id,
-                        name: track.name,
-                        artist: track.artist,
-                        cover: track.cover,
-                        kind: "track".to_string(),
-                        duration: track.duration,
-                        video: track.video,
-                    }
+                .map(|album| HomeItem {
+                    id: album.id.clone(),
+                    name: album.name.clone(),
+                    artist: album
+                        .artists
+                        .iter()
+                        .map(|artist| artist.name.as_str())
+                        .collect::<Vec<_>>()
+                        .join(", "),
+                    cover: pick_cover(&album.cover),
+                    kind: "album".to_string(),
+                    duration: None,
+                    video: false,
                 })
-                .collect()
+                .collect(),
+            "indonesia" | "international" => {
+                let region = if section == "indonesia" {
+                    Country::Id
+                } else {
+                    Country::Zz
+                };
+                let charts = q.music_charts(Some(region)).await.map_err(|e| e.to_string())?;
+                let name = if region == Country::Id {
+                    "Daily Top Music Videos - Indonesia"
+                } else {
+                    "Daily Top Music Videos - Global"
+                };
+                let playlist = charts
+                    .playlists
+                    .iter()
+                    .find(|playlist| playlist.name == name)
+                    .ok_or_else(|| format!("Daily chart playlist unavailable: {name}"))?;
+                q.music_playlist(&playlist.id)
+                    .await
+                    .map_err(|e| e.to_string())?
+                    .tracks
+                    .items
+                    .iter()
+                    .filter(|track| track.track_type != TrackType::Episode)
+                    .take(8)
+                    .map(|track| {
+                        let track = map_track(track, false);
+                        HomeItem {
+                            id: track.id,
+                            name: track.name,
+                            artist: track.artist,
+                            cover: track.cover,
+                            kind: "track".to_string(),
+                            duration: track.duration,
+                            video: track.video,
+                        }
+                    })
+                    .collect()
+            }
+            _ => return Err(format!("Unsupported home section: {section}")),
+        };
+        Ok(HomeSection { items })
+    }
+
+    pub async fn collection_tracks(&self, id: &str, kind: &str) -> Result<Vec<Track>, String> {
+        let q = self
+            .rp
+            .query()
+            .unauthenticated()
+            .lang(Language::En)
+            .country(Country::Id);
+        let tracks = match kind {
+            "album" => q.music_album(id).await.map_err(|e| e.to_string())?.tracks,
+            "playlist" => q
+                .music_playlist(id)
+                .await
+                .map_err(|e| e.to_string())?
+                .tracks
+                .items,
+            _ => return Err(format!("Unsupported collection kind: {kind}")),
+        };
+        Ok(tracks
+            .iter()
+            .filter(|track| track.track_type != TrackType::Episode)
+            .map(|track| map_track(track, track.track_type == TrackType::Video))
+            .collect())
+    }
+
+    pub async fn search(&self, query: &str, kind: &str) -> Result<Vec<Track>, String> {
+        let q = self.rp.query();
+        let items = if kind == "videos" {
+            q.music_search_videos(query)
+                .await
+                .map_err(|e| e.to_string())?
+                .items
+                .items
+        } else {
+            q.music_search_tracks(query)
+                .await
+                .map_err(|e| e.to_string())?
+                .items
+                .items
+        };
+        Ok(items
+            .iter()
+            .map(|t| map_track(t, kind == "videos"))
+            .collect())
+    }
+
+    pub async fn streams(&self, video_id: &str) -> Result<StreamsResponse, String> {
+        if let Ok(resolved) = streams::resolve_streams(&self.bg, &self.proxy, video_id).await {
+            let mut audio: Vec<AudioOption> = resolved
+                .audio
+                .into_iter()
+                .map(|s| AudioOption {
+                    url: s.url,
+                    mime: s.mime,
+                    bitrate: s.bitrate,
+                })
+                .collect();
+            audio.sort_by(|a, b| b.bitrate.cmp(&a.bitrate));
+
+            let mut muxed: Vec<VideoOption> = resolved
+                .muxed
+                .into_iter()
+                .map(|s| VideoOption {
+                    url: s.url,
+                    mime: s.mime,
+                    quality: s.quality,
+                    height: s.height,
+                })
+                .collect();
+            muxed.sort_by(|a, b| b.height.cmp(&a.height));
+
+            let mut video_only: Vec<VideoOption> = resolved
+                .video_only
+                .into_iter()
+                .map(|s| VideoOption {
+                    url: s.url,
+                    mime: s.mime,
+                    quality: s.quality,
+                    height: s.height,
+                })
+                .collect();
+            video_only.sort_by(|a, b| b.height.cmp(&a.height));
+
+            return Ok(StreamsResponse {
+                muxed,
+                video_only,
+                audio,
+                expires_in_seconds: resolved.expires_in_seconds,
+            });
         }
-        _ => return Err(format!("Unsupported home section: {section}")),
-    };
-    Ok(HomeSection { items })
-}
 
-#[tauri::command]
-async fn collection_tracks(
-    state: State<'_, AppState>,
-    id: String,
-    kind: String,
-) -> Result<Vec<Track>, String> {
-    let q = state
-        .rp
-        .query()
-        .unauthenticated()
-        .lang(Language::En)
-        .country(Country::Id);
-    let tracks = match kind.as_str() {
-        "album" => q.music_album(&id).await.map_err(|e| e.to_string())?.tracks,
-        "playlist" => q
-            .music_playlist(&id)
+        let player = self
+            .rp
+            .query()
+            .player_from_client(video_id, ClientType::Ios)
             .await
-            .map_err(|e| e.to_string())?
-            .tracks
-            .items,
-        _ => return Err(format!("Unsupported collection kind: {kind}")),
-    };
-    Ok(tracks
-        .iter()
-        .filter(|track| track.track_type != TrackType::Episode)
-        .map(|track| map_track(track, track.track_type == TrackType::Video))
-        .collect())
-}
+            .map_err(|e| e.to_string())?;
 
-#[tauri::command]
-async fn search(
-    state: State<'_, AppState>,
-    query: String,
-    kind: String,
-) -> Result<Vec<Track>, String> {
-    let q = state.rp.query();
-    let items = if kind == "videos" {
-        q.music_search_videos(&query)
-            .await
-            .map_err(|e| e.to_string())?
-            .items
-            .items
-    } else {
-        q.music_search_tracks(&query)
-            .await
-            .map_err(|e| e.to_string())?
-            .items
-            .items
-    };
-    Ok(items
-        .iter()
-        .map(|t| map_track(t, kind == "videos"))
-        .collect())
-}
-
-#[tauri::command]
-async fn streams(state: State<'_, AppState>, video_id: String) -> Result<StreamsResponse, String> {
-    if let Ok(resolved) = streams::resolve_streams(&state.bg, &state.proxy, &video_id).await {
-        let mut audio: Vec<AudioOption> = resolved
-            .audio
-            .into_iter()
+        let mut audio: Vec<AudioOption> = player
+            .audio_streams
+            .iter()
+            .filter(|s| s.drm_track_type.is_none())
             .map(|s| AudioOption {
-                url: s.url,
-                mime: s.mime,
+                url: self.proxy.register(&s.url, Some(s.size), Some(&s.mime)),
+                mime: s.mime.clone(),
                 bitrate: s.bitrate,
             })
             .collect();
         audio.sort_by(|a, b| b.bitrate.cmp(&a.bitrate));
 
-        let mut muxed: Vec<VideoOption> = resolved
-            .muxed
-            .into_iter()
+        let mut muxed: Vec<VideoOption> = player
+            .video_streams
+            .iter()
+            .filter(|s| s.drm_track_type.is_none())
             .map(|s| VideoOption {
-                url: s.url,
-                mime: s.mime,
-                quality: s.quality,
+                url: self.proxy.register(&s.url, s.size, Some(&s.mime)),
+                mime: s.mime.clone(),
+                quality: s.quality.clone(),
                 height: s.height,
             })
             .collect();
         muxed.sort_by(|a, b| b.height.cmp(&a.height));
 
-        let mut video_only: Vec<VideoOption> = resolved
-            .video_only
-            .into_iter()
+        let mut video_only: Vec<VideoOption> = player
+            .video_only_streams
+            .iter()
+            .filter(|s| s.drm_track_type.is_none())
             .map(|s| VideoOption {
-                url: s.url,
-                mime: s.mime,
-                quality: s.quality,
+                url: self.proxy.register(&s.url, s.size, Some(&s.mime)),
+                mime: s.mime.clone(),
+                quality: s.quality.clone(),
                 height: s.height,
             })
             .collect();
         video_only.sort_by(|a, b| b.height.cmp(&a.height));
 
-        return Ok(StreamsResponse {
+        Ok(StreamsResponse {
             muxed,
             video_only,
             audio,
-            expires_in_seconds: resolved.expires_in_seconds,
-        });
+            expires_in_seconds: player.expires_in_seconds,
+        })
     }
 
-    let player = state
-        .rp
-        .query()
-        .player_from_client(&video_id, rustypipe::client::ClientType::Ios)
-        .await
-        .map_err(|e| e.to_string())?;
-
-    let mut audio: Vec<AudioOption> = player
-        .audio_streams
-        .iter()
-        .filter(|s| s.drm_track_type.is_none())
-        .map(|s| AudioOption {
-            url: state.proxy.register(&s.url, Some(s.size), Some(&s.mime)),
-            mime: s.mime.clone(),
-            bitrate: s.bitrate,
-        })
-        .collect();
-    audio.sort_by(|a, b| b.bitrate.cmp(&a.bitrate));
-
-    let mut muxed: Vec<VideoOption> = player
-        .video_streams
-        .iter()
-        .filter(|s| s.drm_track_type.is_none())
-        .map(|s| VideoOption {
-            url: state.proxy.register(&s.url, s.size, Some(&s.mime)),
-            mime: s.mime.clone(),
-            quality: s.quality.clone(),
-            height: s.height,
-        })
-        .collect();
-    muxed.sort_by(|a, b| b.height.cmp(&a.height));
-
-    let mut video_only: Vec<VideoOption> = player
-        .video_only_streams
-        .iter()
-        .filter(|s| s.drm_track_type.is_none())
-        .map(|s| VideoOption {
-            url: state.proxy.register(&s.url, s.size, Some(&s.mime)),
-            mime: s.mime.clone(),
-            quality: s.quality.clone(),
-            height: s.height,
-        })
-        .collect();
-    video_only.sort_by(|a, b| b.height.cmp(&a.height));
-
-    Ok(StreamsResponse {
-        muxed,
-        video_only,
-        audio,
-        expires_in_seconds: player.expires_in_seconds,
-    })
-}
-
-#[tauri::command]
-async fn radio(state: State<'_, AppState>, video_id: String) -> Result<Vec<Track>, String> {
-    let p = state
-        .rp
-        .query()
-        .music_radio_track(&video_id)
-        .await
-        .map_err(|e| e.to_string())?;
-    Ok(p.items.iter().map(|t| map_track(t, false)).collect())
-}
-
-#[tauri::command]
-fn set_tray_title(app: tauri::AppHandle, title: String) {
-    if let Some(tray) = app.tray_by_id("main") {
-        let _ = tray.set_tooltip(Some(format!("Nada — {title}")));
+    pub async fn radio(&self, video_id: &str) -> Result<Vec<Track>, String> {
+        let p = self
+            .rp
+            .query()
+            .music_radio_track(video_id)
+            .await
+            .map_err(|e| e.to_string())?;
+        Ok(p.items.iter().map(|t| map_track(t, false)).collect())
     }
+}
+
+fn resolve_storage_dir() -> PathBuf {
+    dirs::data_local_dir()
+        .unwrap_or_else(std::env::temp_dir)
+        .join("com.anand.nada")
+}
+
+fn load_embedded_icons() -> (Option<egui::IconData>, Option<Icon>) {
+    const ICON_PNG: &[u8] = include_bytes!("../icons/32x32.png");
+    let Ok(img) = image::load_from_memory(ICON_PNG) else {
+        return (None, None);
+    };
+    let rgba = img.to_rgba8();
+    let (w, h) = rgba.dimensions();
+    let bytes = rgba.into_raw();
+
+    let egui_icon = egui::IconData {
+        rgba: bytes.clone(),
+        width: w,
+        height: h,
+    };
+    let tray_icon = Icon::from_rgba(bytes, w, h).ok();
+    (Some(egui_icon), tray_icon)
+}
+
+pub fn run() {
+    let instance = SingleInstance::new("com.anand.nada.single_instance");
+    if let Ok(inst) = &instance {
+        if !inst.is_single() {
+            return;
+        }
+    }
+
+    let rt = tokio::runtime::Builder::new_multi_thread()
+        .enable_all()
+        .build()
+        .expect("failed to build tokio runtime");
+
+    let storage_dir = resolve_storage_dir();
+    let backend = Arc::new(
+        Backend::init(storage_dir).expect("failed to initialize Nada native backend"),
+    );
+
+    let bg_warm = backend.bg.clone();
+    rt.spawn(async move {
+        let _ = bg_warm.ensure_initialized().await;
+    });
+
+    let (egui_icon, tray_icon_img) = load_embedded_icons();
+    let (tray_tx, tray_rx) = mpsc::channel::<ui::TrayCmd>();
+    let allow_quit = Arc::new(AtomicBool::new(false));
+
+    // Set up native OS system tray (Buka Nada / Play-Pause / Keluar)
+    let menu = Menu::new();
+    let show_item = MenuItem::new("Buka Nada", true, None);
+    let toggle_item = MenuItem::new("Play / Pause", true, None);
+    let quit_item = MenuItem::new("Keluar", true, None);
+    let show_id = show_item.id().clone();
+    let toggle_id = toggle_item.id().clone();
+    let quit_id = quit_item.id().clone();
+    let _ = menu.append_items(&[&show_item, &toggle_item, &quit_item]);
+
+    let mut tray_builder = TrayIconBuilder::new()
+        .with_menu(Box::new(menu))
+        .with_menu_on_left_click(false)
+        .with_tooltip("Nada");
+    if let Some(ic) = tray_icon_img {
+        tray_builder = tray_builder.with_icon(ic);
+    }
+    let tray_handle = tray_builder.build().ok();
+
+    let rt_handle = rt.handle().clone();
+
+    let mut viewport = egui::ViewportBuilder::default()
+        .with_app_id("com.anand.nada")
+        .with_title("Nada")
+        .with_inner_size([430.0, 640.0])
+        .with_min_inner_size([430.0, 520.0])
+        .with_max_inner_size([430.0, 4096.0])
+        .with_maximize_button(false);
+    if let Some(ic) = egui_icon {
+        viewport = viewport.with_icon(Arc::new(ic));
+    }
+
+    let native_options = eframe::NativeOptions {
+        viewport,
+        centered: true,
+        ..Default::default()
+    };
+
+    eframe::run_native(
+        "Nada",
+        native_options,
+        Box::new(move |cc| {
+            let ctx_menu = cc.egui_ctx.clone();
+            let tx_menu = tray_tx.clone();
+            MenuEvent::set_event_handler(Some(Arc::new(move |event: MenuEvent| {
+                if event.id == show_id {
+                    let _ = tx_menu.send(ui::TrayCmd::ShowWindow);
+                } else if event.id == toggle_id {
+                    let _ = tx_menu.send(ui::TrayCmd::TogglePlay);
+                } else if event.id == quit_id {
+                    let _ = tx_menu.send(ui::TrayCmd::Quit);
+                }
+                ctx_menu.request_repaint();
+            })));
+
+            let ctx_tray = cc.egui_ctx.clone();
+            let tx_tray = tray_tx.clone();
+            TrayIconEvent::set_event_handler(Some(move |event: TrayIconEvent| {
+                if let TrayIconEvent::Click {
+                    button: MouseButton::Left,
+                    button_state: MouseButtonState::Up,
+                    ..
+                } = event
+                {
+                    let _ = tx_tray.send(ui::TrayCmd::ShowWindow);
+                    ctx_tray.request_repaint();
+                }
+            }));
+
+            // Keep tray_handle alive inside closure for tooltip updates
+            let tooltip_cb: Option<Box<dyn Fn(&str) + Send>> = None;
+            let _keep_tray = tray_handle;
+
+            Ok(Box::new(ui::NadaApp::new(
+                cc,
+                backend,
+                rt_handle,
+                tray_rx,
+                tooltip_cb,
+                allow_quit,
+            )))
+        }),
+    )
+    .expect("error while running Nada native desktop UI");
 }
 
 #[cfg(test)]
@@ -516,156 +657,4 @@ mod home_tests {
         assert!(bare.artist.is_empty());
         assert!(bare.cover.is_none());
     }
-}
-
-fn force_bring_to_front(w: &tauri::WebviewWindow) {
-    let _ = w.show();
-    let _ = w.unminimize();
-    let _ = w.set_always_on_top(true);
-    let _ = w.set_focus();
-    let _ = w.set_always_on_top(false);
-}
-
-#[cfg_attr(mobile, tauri::mobile_entry_point)]
-pub fn run() {
-    #[cfg(target_os = "windows")]
-    std::env::set_var(
-        "WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS",
-        "--autoplay-policy=no-user-gesture-required",
-    );
-
-    tauri::Builder::default()
-        .plugin(tauri_plugin_single_instance::init(|app, _args, _cwd| {
-            if let Some(w) = app.get_webview_window("main") {
-                force_bring_to_front(&w);
-            }
-        }))
-        .setup(|app| {
-            let storage_dir = app
-                .path()
-                .app_local_data_dir()
-                .expect("failed to resolve app data dir");
-            std::fs::create_dir_all(&storage_dir).ok();
-            let cache_dir = storage_dir.join("stream_cache");
-            let _ = std::fs::remove_dir_all(&cache_dir);
-            std::fs::create_dir_all(&cache_dir).ok();
-            let proxy_log = storage_dir.join("proxy.log");
-            let proxy = proxy::StreamProxy::start(proxy_log, cache_dir)
-                .expect("failed to start stream proxy");
-            let rp = RustyPipe::builder()
-                .storage_dir(storage_dir)
-                .build()
-                .expect("failed to build RustyPipe client");
-
-            let bg_loaded = Arc::new((Mutex::new(false), Condvar::new()));
-            let bg_loaded_hook = bg_loaded.clone();
-            let bg_win = tauri::WebviewWindowBuilder::new(
-                app,
-                "bg_worker",
-                tauri::WebviewUrl::External("https://www.youtube.com/robots.txt".parse().unwrap()),
-            )
-            .title("Nada BgWorker")
-            .visible(false)
-            .skip_taskbar(true)
-            .inner_size(1.0, 1.0)
-            .on_page_load(move |_win, payload| {
-                if matches!(payload.event(), tauri::webview::PageLoadEvent::Finished)
-                    && payload.url().as_str().contains("robots.txt")
-                {
-                    let (lock, cvar) = &*bg_loaded_hook;
-                    *lock.lock().unwrap() = true;
-                    cvar.notify_all();
-                }
-            })
-            .build()?;
-            let host = Arc::new(
-                bg_engine::TauriJsHost::new(bg_win, bg_loaded)
-                    .expect("failed to start TauriJsHost"),
-            );
-            let bg = Arc::new(bg_engine::BgEngine::new(host).expect("failed to init BgEngine"));
-            let bg_warm = bg.clone();
-            tauri::async_runtime::spawn(async move {
-                let _ = bg_warm.ensure_initialized().await;
-            });
-
-            app.manage(AppState { rp, proxy, bg });
-
-            if let Some(window) = app.get_webview_window("main") {
-                let _ = window.set_maximizable(false);
-                if let Some(monitor) = window.current_monitor()? {
-                    let area = monitor.work_area();
-                    let scale = monitor.scale_factor();
-                    let fixed_width = (430.0 * scale).round() as u32;
-                    let min_height = (520.0 * scale).round() as u32;
-                    let max_height = area.size.height;
-                    let initial_height = ((640.0 * scale).round() as u32).min(max_height);
-
-                    window.set_min_size(Some(tauri::PhysicalSize::new(fixed_width, min_height)))?;
-                    window.set_max_size(Some(tauri::PhysicalSize::new(fixed_width, max_height)))?;
-                    window.set_size(tauri::PhysicalSize::new(fixed_width, initial_height))?;
-
-                    let pos_x = area.position.x + (area.size.width.saturating_sub(fixed_width) / 2) as i32;
-                    let pos_y = area.position.y + (area.size.height.saturating_sub(initial_height) / 2) as i32;
-                    window.set_position(tauri::PhysicalPosition::new(pos_x, pos_y))?;
-                }
-                force_bring_to_front(&window);
-            }
-
-            let show = MenuItem::with_id(app, "show", "Buka Nada", true, None::<&str>)?;
-            let toggle = MenuItem::with_id(app, "toggle", "Play / Pause", true, None::<&str>)?;
-            let quit = MenuItem::with_id(app, "quit", "Keluar", true, None::<&str>)?;
-            let menu = Menu::with_items(app, &[&show, &toggle, &quit])?;
-
-            TrayIconBuilder::with_id("main")
-                .icon(app.default_window_icon().unwrap().clone())
-                .menu(&menu)
-                .show_menu_on_left_click(false)
-                .tooltip("Nada")
-                .on_menu_event(|app, event| match event.id.as_ref() {
-                    "show" => {
-                        if let Some(w) = app.get_webview_window("main") {
-                            force_bring_to_front(&w);
-                        }
-                    }
-                    "toggle" => {
-                        let _ = app.emit("nada://toggle-play", ());
-                    }
-                    "quit" => app.exit(0),
-                    _ => {}
-                })
-                .on_tray_icon_event(|tray, event| {
-                    if let TrayIconEvent::Click {
-                        button: MouseButton::Left,
-                        button_state: MouseButtonState::Up,
-                        ..
-                    } = event
-                    {
-                        let app = tray.app_handle();
-                        if let Some(w) = app.get_webview_window("main") {
-                            force_bring_to_front(&w);
-                        }
-                    }
-                })
-                .build(app)?;
-
-            Ok(())
-        })
-        .on_window_event(|window, event| {
-            if let tauri::WindowEvent::CloseRequested { api, .. } = event {
-                if window.label() == "main" {
-                    api.prevent_close();
-                    let _ = window.hide();
-                }
-            }
-        })
-        .invoke_handler(tauri::generate_handler![
-            search,
-            streams,
-            radio,
-            set_tray_title,
-            home_section,
-            collection_tracks,
-        ])
-        .run(tauri::generate_context!())
-        .expect("error while running Nada");
 }

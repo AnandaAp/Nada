@@ -1627,7 +1627,7 @@ impl NadaApp {
                 .frame(Frame::new().fill(Color32::BLACK))
                 .show(ui, |ui| {
                     let rect = ui.max_rect();
-                    let resp = ui.allocate_rect(rect, Sense::click());
+                    let _ = ui.allocate_rect(rect, Sense::hover());
                     let painter = ui.painter_at(rect);
 
                     if let Some(tex) = &tex_opt {
@@ -1652,14 +1652,16 @@ impl NadaApp {
                         );
                     }
 
-                    // Overlay PiP controls on hover
-                    if resp.hovered() {
+                    // Overlay PiP controls while pointer is anywhere inside the PiP rect
+                    // (uses rect_contains_pointer so child buttons don't steal hover and cause flicker)
+                    if ui.rect_contains_pointer(rect) {
                         let ctrl_rect = Rect::from_center_size(
-                            Pos2::new(rect.center().x, rect.bottom() - 26.0),
-                            Vec2::new(96.0, 36.0),
+                            Pos2::new(rect.center().x, rect.bottom() - 28.0),
+                            Vec2::new(80.0, 36.0),
                         );
                         let mut child = ui.new_child(egui::UiBuilder::new().max_rect(ctrl_rect));
                         child.horizontal(|ui| {
+                            ui.spacing_mut().item_spacing.x = 8.0;
                             let icon = if is_playing {
                                 IconKind::Pause
                             } else {

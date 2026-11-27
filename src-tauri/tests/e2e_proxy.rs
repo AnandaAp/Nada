@@ -1418,171 +1418,10 @@ fn t4_05_multi_track_12_track_replay_and_seek_storm() {
 #[test]
 #[ignore = "Live network YouTube test (run with -- --ignored --nocapture)"]
 fn t4_06_live_youtube_kalah2_and_mangu_acceptance() {
-    use nada::bg_engine::{
-        parse_sync_json_result, unwrap_callback_payload, wrap_async_script, BgEngine,
-        CallbackBridge, JsHost,
-    };
+    use nada::bg_engine::{BgEngine, JsHost, QuickJsHost};
     use nada::proxy::StreamProxy;
     use nada::streams::{resolve_streams, ResolvedAudio, ResolvedStreams, ResolvedVideo};
     use rustypipe::client::{ClientType, RustyPipe};
-    use std::sync::{mpsc, Condvar};
-    use tao::dpi::LogicalSize;
-    use tao::event::Event;
-    use tao::event_loop::{ControlFlow, EventLoopBuilder, EventLoopProxy};
-    use tao::platform::run_return::EventLoopExtRunReturn;
-    #[cfg(target_os = "windows")]
-    use tao::platform::windows::{EventLoopBuilderExtWindows, WindowBuilderExtWindows};
-    use tao::window::WindowBuilder;
-    use wry::{PageLoadEvent, WebViewBuilder};
-
-    enum WryCmd {
-        Eval(String),
-        EvalCb(String, mpsc::Sender<String>),
-        Quit,
-    }
-
-    struct LiveWryJsHost {
-        proxy: EventLoopProxy<WryCmd>,
-        loaded: Arc<(Mutex<bool>, Condvar)>,
-        bridge: CallbackBridge,
-        thread: Option<std::thread::JoinHandle<()>>,
-    }
-
-    impl LiveWryJsHost {
-        fn start() -> Result<Self, String> {
-            let bridge = CallbackBridge::start()?;
-            let loaded = Arc::new((Mutex::new(false), Condvar::new()));
-            let loaded_hook = loaded.clone();
-            let (tx, rx) = mpsc::channel::<Result<EventLoopProxy<WryCmd>, String>>();
-
-            let thread = std::thread::spawn(move || {
-                let mut builder = EventLoopBuilder::<WryCmd>::with_user_event();
-                #[cfg(target_os = "windows")]
-                builder.with_any_thread(true);
-                let mut event_loop = builder.build();
-                let el_proxy = event_loop.create_proxy();
-
-                let mut win_builder = WindowBuilder::new()
-                    .with_title("Nada E2E Live BgWorker")
-                    .with_visible(false)
-                    .with_inner_size(LogicalSize::new(1.0, 1.0));
-                #[cfg(target_os = "windows")]
-                {
-                    win_builder = win_builder.with_skip_taskbar(true);
-                }
-                let window = match win_builder.build(&event_loop) {
-                    Ok(w) => w,
-                    Err(e) => {
-                        let _ = tx.send(Err(format!("tao window build failed: {e}")));
-                        return;
-                    }
-                };
-                let webview = match WebViewBuilder::new()
-                    .with_url("https://www.youtube.com/robots.txt")
-                    .with_on_page_load_handler(move |event, url| {
-                        if matches!(event, PageLoadEvent::Finished) && url.contains("robots.txt") {
-                            let (lock, cvar) = &*loaded_hook;
-                            *lock.lock().unwrap() = true;
-                            cvar.notify_all();
-                        }
-                    })
-                    .build(&window)
-                {
-                    Ok(wv) => wv,
-                    Err(e) => {
-                        let _ = tx.send(Err(format!("wry webview build failed: {e}")));
-                        return;
-                    }
-                };
-                let _ = tx.send(Ok(el_proxy));
-                event_loop.run_return(move |event, _, control_flow| {
-                    *control_flow = ControlFlow::Wait;
-                    if let Event::UserEvent(cmd) = event {
-                        match cmd {
-                            WryCmd::Eval(js) => {
-                                let _ = webview.evaluate_script(&js);
-                            }
-                            WryCmd::EvalCb(js, tx) => {
-                                let _ = webview.evaluate_script_with_callback(&js, move |res| {
-                                    let _ = tx.send(res);
-                                });
-                            }
-                            WryCmd::Quit => {
-                                *control_flow = ControlFlow::Exit;
-                            }
-                        }
-                    }
-                });
-                drop(window);
-            });
-
-            let proxy = rx
-                .recv_timeout(Duration::from_secs(15))
-                .map_err(|e| format!("LiveWryJsHost init timeout: {e}"))??;
-            Ok(Self {
-                proxy,
-                loaded,
-                bridge,
-                thread: Some(thread),
-            })
-        }
-
-        fn wait_ready(&self, timeout: Duration) -> Result<(), String> {
-            let deadline = Instant::now() + timeout;
-            let (lock, cvar) = &*self.loaded;
-            let mut guard = lock.lock().unwrap();
-            while !*guard {
-                let now = Instant::now();
-                if now >= deadline {
-                    return Err("LiveWryJsHost timed out waiting for robots.txt".to_string());
-                }
-                let (g, _) = cvar.wait_timeout(guard, deadline - now).unwrap();
-                guard = g;
-            }
-            Ok(())
-        }
-    }
-
-    impl Drop for LiveWryJsHost {
-        fn drop(&mut self) {
-            let _ = self.proxy.send_event(WryCmd::Quit);
-            if let Some(h) = self.thread.take() {
-                let _ = h.join();
-            }
-        }
-    }
-
-    impl JsHost for LiveWryJsHost {
-        fn eval_async_json(&self, script_body: &str, timeout: Duration) -> Result<serde_json::Value, String> {
-            self.wait_ready(Duration::from_secs(15))?;
-            let (req_id, cb_url, rx) = self.bridge.register();
-            let wrapped = wrap_async_script(script_body, &cb_url);
-            if self.proxy.send_event(WryCmd::Eval(wrapped)).is_err() {
-                self.bridge.cancel(&req_id);
-                return Err("LiveWryJsHost closed".to_string());
-            }
-            let raw = match rx.recv_timeout(timeout) {
-                Ok(s) => s,
-                Err(e) => {
-                    self.bridge.cancel(&req_id);
-                    return Err(format!("LiveWryJsHost async timeout: {e}"));
-                }
-            };
-            unwrap_callback_payload(&raw)
-        }
-
-        fn eval_sync_json(&self, expr: &str, timeout: Duration) -> Result<serde_json::Value, String> {
-            self.wait_ready(Duration::from_secs(15))?;
-            let (tx, rx) = mpsc::channel();
-            self.proxy
-                .send_event(WryCmd::EvalCb(expr.to_string(), tx))
-                .map_err(|_| "LiveWryJsHost closed".to_string())?;
-            let raw = rx
-                .recv_timeout(timeout)
-                .map_err(|e| format!("LiveWryJsHost sync timeout: {e}"))?;
-            parse_sync_json_result(&raw)
-        }
-    }
 
     fn verify_live_stream_and_seeks(
         client: &reqwest::blocking::Client,
@@ -1640,7 +1479,7 @@ fn t4_06_live_youtube_kalah2_and_mangu_acceptance() {
     let proxy = StreamProxy::start(dir.log_path(), dir.cache_dir()).expect("StreamProxy::start failed");
     let rt = tokio::runtime::Runtime::new().unwrap();
     let rp = RustyPipe::new();
-    let host = LiveWryJsHost::start().ok().map(Arc::new);
+    let host = QuickJsHost::start().ok().map(Arc::new);
     let bg = host
         .as_ref()
         .and_then(|h| BgEngine::new(h.clone() as Arc<dyn JsHost>).ok())

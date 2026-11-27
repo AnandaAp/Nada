@@ -1,222 +1,8 @@
-use nada::bg_engine::{
-    parse_sync_json_result, unwrap_callback_payload, wrap_async_script, BgEngine, CallbackBridge,
-    JsHost,
-};
+use nada::bg_engine::{BgEngine, QuickJsHost};
 use nada::proxy::StreamProxy;
 use nada::streams::resolve_streams;
-use serde_json::Value;
-use std::sync::{mpsc, Arc, Condvar, Mutex};
+use std::sync::Arc;
 use std::time::Duration;
-use tao::dpi::LogicalSize;
-use tao::event::Event;
-use tao::event_loop::{ControlFlow, EventLoopBuilder, EventLoopProxy};
-use tao::platform::run_return::EventLoopExtRunReturn;
-#[cfg(target_os = "windows")]
-use tao::platform::windows::{EventLoopBuilderExtWindows, WindowBuilderExtWindows};
-use tao::window::WindowBuilder;
-use wry::{PageLoadEvent, WebViewBuilder};
-
-enum WryCmd {
-    Eval(String),
-    EvalCb(String, mpsc::Sender<String>),
-    Navigate(String),
-    Quit,
-}
-
-struct WryJsHost {
-    proxy: EventLoopProxy<WryCmd>,
-    loaded: Arc<(Mutex<bool>, Condvar)>,
-    bridge: CallbackBridge,
-    thread: Option<std::thread::JoinHandle<()>>,
-}
-
-impl WryJsHost {
-    fn start() -> Result<Self, String> {
-        let bridge = CallbackBridge::start()?;
-        let loaded = Arc::new((Mutex::new(false), Condvar::new()));
-        let loaded_hook = loaded.clone();
-        let (tx, rx) = mpsc::channel::<Result<EventLoopProxy<WryCmd>, String>>();
-
-        let thread = std::thread::spawn(move || {
-            let mut builder = EventLoopBuilder::<WryCmd>::with_user_event();
-            #[cfg(target_os = "windows")]
-            builder.with_any_thread(true);
-            let mut event_loop = builder.build();
-            let el_proxy = event_loop.create_proxy();
-
-            let mut win_builder = WindowBuilder::new()
-                .with_title("Nada VerifyProxy BgWorker")
-                .with_visible(false)
-                .with_inner_size(LogicalSize::new(1.0, 1.0));
-            #[cfg(target_os = "windows")]
-            {
-                win_builder = win_builder.with_skip_taskbar(true);
-            }
-            let window = match win_builder.build(&event_loop) {
-                Ok(w) => w,
-                Err(e) => {
-                    let _ = tx.send(Err(format!("tao window build failed: {e}")));
-                    return;
-                }
-            };
-
-            let webview = match WebViewBuilder::new()
-                .with_url("https://www.youtube.com/robots.txt")
-                .with_on_page_load_handler(move |event, url| {
-                    if matches!(event, PageLoadEvent::Finished) && url.contains("robots.txt") {
-                        let (lock, cvar) = &*loaded_hook;
-                        *lock.lock().unwrap() = true;
-                        cvar.notify_all();
-                    }
-                })
-                .build(&window)
-            {
-                Ok(wv) => wv,
-                Err(e) => {
-                    let _ = tx.send(Err(format!("wry webview build failed: {e}")));
-                    return;
-                }
-            };
-
-            let _ = tx.send(Ok(el_proxy));
-
-            event_loop.run_return(move |event, _, control_flow| {
-                *control_flow = ControlFlow::Wait;
-                if let Event::UserEvent(cmd) = event {
-                    match cmd {
-                        WryCmd::Eval(js) => {
-                            let _ = webview.evaluate_script(&js);
-                        }
-                        WryCmd::EvalCb(js, tx) => {
-                            let _ = webview.evaluate_script_with_callback(&js, move |res| {
-                                let _ = tx.send(res);
-                            });
-                        }
-                        WryCmd::Navigate(url) => {
-                            let _ = webview.load_url(&url);
-                        }
-                        WryCmd::Quit => {
-                            *control_flow = ControlFlow::Exit;
-                        }
-                    }
-                }
-            });
-            drop(window);
-        });
-
-        let proxy = rx
-            .recv_timeout(Duration::from_secs(15))
-            .map_err(|e| format!("WryJsHost init timeout: {e}"))??;
-
-        Ok(Self {
-            proxy,
-            loaded,
-            bridge,
-            thread: Some(thread),
-        })
-    }
-
-    fn wait_ready(&self, timeout: Duration) -> Result<(), String> {
-        let started = std::time::Instant::now();
-        let deadline = started + timeout;
-        let mut last_nav_attempt: Option<std::time::Instant> = None;
-        let (lock, cvar) = &*self.loaded;
-        let mut guard = lock.lock().unwrap();
-        while !*guard {
-            let now = std::time::Instant::now();
-            if now >= deadline {
-                return Err("WryJsHost timed out waiting for robots.txt page load".to_string());
-            }
-            let step = (deadline - now).min(Duration::from_millis(500));
-            let (g, _) = cvar.wait_timeout(guard, step).unwrap();
-            guard = g;
-            if *guard {
-                break;
-            }
-            drop(guard);
-
-            let (tx, rx) = mpsc::channel();
-            if self
-                .proxy
-                .send_event(WryCmd::EvalCb(
-                    "(() => ({ ready: document.readyState === 'complete', host: String(location.hostname || '') }))()".to_string(),
-                    tx,
-                ))
-                .is_ok()
-            {
-                if let Ok(raw) = rx.recv_timeout(Duration::from_millis(250)) {
-                    if let Ok(val) = parse_sync_json_result(&raw) {
-                        let ready = val.get("ready").and_then(Value::as_bool).unwrap_or(false);
-                        let host = val.get("host").and_then(Value::as_str).unwrap_or("");
-                        if ready && host.ends_with("youtube.com") {
-                            let mut g2 = lock.lock().unwrap();
-                            *g2 = true;
-                            cvar.notify_all();
-                            return Ok(());
-                        }
-                        let should_retry_nav = !host.ends_with("youtube.com")
-                            && ((ready
-                                && last_nav_attempt
-                                    .is_none_or(|t| t.elapsed() >= Duration::from_secs(3)))
-                                || (!ready
-                                    && started.elapsed() >= Duration::from_secs(10)
-                                    && last_nav_attempt
-                                        .is_none_or(|t| t.elapsed() >= Duration::from_secs(8))));
-                        if should_retry_nav {
-                            let _ = self.proxy.send_event(WryCmd::Navigate(
-                                "https://www.youtube.com/robots.txt".to_string(),
-                            ));
-                            last_nav_attempt = Some(std::time::Instant::now());
-                        }
-                    }
-                }
-            }
-            guard = lock.lock().unwrap();
-        }
-        Ok(())
-    }
-}
-
-impl Drop for WryJsHost {
-    fn drop(&mut self) {
-        let _ = self.proxy.send_event(WryCmd::Quit);
-        if let Some(h) = self.thread.take() {
-            let _ = h.join();
-        }
-    }
-}
-
-impl JsHost for WryJsHost {
-    fn eval_async_json(&self, script_body: &str, timeout: Duration) -> Result<Value, String> {
-        self.wait_ready(Duration::from_secs(30))?;
-        let (req_id, cb_url, rx) = self.bridge.register();
-        let wrapped = wrap_async_script(script_body, &cb_url);
-        if self.proxy.send_event(WryCmd::Eval(wrapped)).is_err() {
-            self.bridge.cancel(&req_id);
-            return Err("WryJsHost event loop closed".to_string());
-        }
-        let raw = match rx.recv_timeout(timeout) {
-            Ok(s) => s,
-            Err(e) => {
-                self.bridge.cancel(&req_id);
-                return Err(format!("WryJsHost async callback timeout: {e}"));
-            }
-        };
-        unwrap_callback_payload(&raw)
-    }
-
-    fn eval_sync_json(&self, expr: &str, timeout: Duration) -> Result<Value, String> {
-        self.wait_ready(Duration::from_secs(30))?;
-        let (tx, rx) = mpsc::channel();
-        self.proxy
-            .send_event(WryCmd::EvalCb(expr.to_string(), tx))
-            .map_err(|_| "WryJsHost event loop closed".to_string())?;
-        let raw = rx
-            .recv_timeout(timeout)
-            .map_err(|e| format!("WryJsHost sync callback timeout: {e}"))?;
-        parse_sync_json_result(&raw)
-    }
-}
 
 async fn fetch_full_and_verify_head(
     client: &reqwest::Client,
@@ -368,7 +154,7 @@ fn main() {
     };
 
     let proxy = StreamProxy::start(log_path.clone(), cache_dir).expect("proxy failed to start");
-    let host = Arc::new(WryJsHost::start().expect("WryJsHost failed to start"));
+    let host = Arc::new(QuickJsHost::start().expect("QuickJsHost failed to start"));
     let bg = Arc::new(BgEngine::new(host.clone()).expect("BgEngine init failed"));
 
     let rt = tokio::runtime::Runtime::new().unwrap();
@@ -382,7 +168,7 @@ fn main() {
         bg.ensure_initialized()
             .await
             .expect("BgEngine live initialization failed");
-        println!("[OK] WebView2 BotGuard + base.js initialized");
+        println!("[OK] QuickJS BotGuard + base.js initialized");
 
         let tracks = [
             ("fUdfDKyrbjk", "Mangu", true),

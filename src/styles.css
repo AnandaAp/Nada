@@ -311,18 +311,6 @@ header {
   color: var(--accent-brass);
 }
 
-.brand .brand-sub {
-  font-family: var(--font-mono);
-  font-size: 9px;
-  font-weight: 700;
-  letter-spacing: 1.6px;
-  color: var(--accent-gold);
-  background: rgba(245, 158, 11, 0.12);
-  border: 1px solid rgba(245, 158, 11, 0.25);
-  border-radius: var(--radius-item);
-  padding: 2px 5px;
-}
-
 .homebtn {
   height: 28px;
   padding: 0 12px;

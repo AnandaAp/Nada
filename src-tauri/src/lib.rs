@@ -433,7 +433,7 @@ fn resolve_storage_dir() -> PathBuf {
 }
 
 fn load_embedded_icons() -> (Option<egui::IconData>, Option<Icon>) {
-    const WINDOW_PNG: &[u8] = include_bytes!("../icons/128x128@2x.png");
+    const WINDOW_PNG: &[u8] = include_bytes!("../icons/64x64.png");
     const TRAY_PNG: &[u8] = include_bytes!("../icons/32x32.png");
 
     let egui_icon = image::load_from_memory(WINDOW_PNG).ok().map(|img| {
@@ -465,7 +465,7 @@ fn apply_win32_window_icons(cc: &eframe::CreationContext<'_>) {
         LR_SHARED, WM_SETICON,
     };
 
-    const WINDOW_PNG: &[u8] = include_bytes!("../icons/128x128@2x.png");
+    const WINDOW_PNG: &[u8] = include_bytes!("../icons/64x64.png");
     let Ok(wh) = cc.window_handle() else {
         return;
     };
@@ -478,32 +478,23 @@ fn apply_win32_window_icons(cc: &eframe::CreationContext<'_>) {
         let hwnd = hwnd_val as *mut core::ffi::c_void;
         unsafe {
             let hmod = GetModuleHandleW(std::ptr::null());
+            // Use LR_DEFAULTSIZE so Windows selects the exact system taskbar icon size (SM_CXICON)
             let mut big = LoadImageW(
                 hmod,
                 1usize as *const u16,
                 IMAGE_ICON,
-                256,
-                256,
-                LR_SHARED,
+                0,
+                0,
+                LR_DEFAULTSIZE | LR_SHARED,
             );
-            if big.is_null() {
-                big = LoadImageW(
-                    hmod,
-                    1usize as *const u16,
-                    IMAGE_ICON,
-                    0,
-                    0,
-                    LR_DEFAULTSIZE | LR_SHARED,
-                );
-            }
             if big.is_null() {
                 big = CreateIconFromResourceEx(
                     WINDOW_PNG.as_ptr(),
                     WINDOW_PNG.len() as u32,
                     1,
                     0x0003_0000,
-                    256,
-                    256,
+                    48,
+                    48,
                     LR_DEFAULTCOLOR,
                 );
             }
@@ -512,8 +503,8 @@ fn apply_win32_window_icons(cc: &eframe::CreationContext<'_>) {
                 hmod,
                 1usize as *const u16,
                 IMAGE_ICON,
-                32,
-                32,
+                16,
+                16,
                 LR_SHARED,
             );
             if small.is_null() {
@@ -532,9 +523,8 @@ fn apply_win32_window_icons(cc: &eframe::CreationContext<'_>) {
     };
 
     apply_now(hwnd_raw);
-    // Re-apply shortly after first window show in case winit resets WM_SETICON during startup
     std::thread::spawn(move || {
-        std::thread::sleep(std::time::Duration::from_millis(250));
+        std::thread::sleep(std::time::Duration::from_millis(350));
         apply_now(hwnd_raw);
     });
 }

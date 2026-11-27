@@ -1639,11 +1639,24 @@ impl NadaApp {
         let dur = self.effective_duration(snap);
         let cur = self.seeking_val.unwrap_or(snap.position_secs).clamp(0.0, dur.max(0.0));
 
+        // Outer ambient tray so the Liquid Glass dock floats cleanly above the bottom edge
         Frame::new()
-            .fill(SURFACE_PANEL)
-            .stroke(Stroke::new(1.0, BORDER_SUBTLE))
-            .inner_margin(Margin::symmetric(14, 10))
+            .fill(BG_STUDIO)
+            .inner_margin(Margin {
+                left: 10,
+                right: 10,
+                top: 6,
+                bottom: 10,
+            })
             .show(ui, |ui| {
+                // Reserve background layer index so we can paint the multi-layer Liquid Glass
+                // optical surface behind the interactive controls once the dock rect is known.
+                let bg_shape_idx = ui.painter().add(Shape::Noop);
+                let inner = Frame::new()
+                    .fill(Color32::TRANSPARENT)
+                    .corner_radius(CornerRadius::same(18))
+                    .inner_margin(Margin::symmetric(14, 11))
+                    .show(ui, |ui| {
                 // Row 1: Progress bar
                 ui.horizontal(|ui| {
                     ui.label(
@@ -1682,7 +1695,7 @@ impl NadaApp {
                     );
                 });
 
-                ui.add_space(6.0);
+                ui.add_space(7.0);
 
                 // Row 2: Cover + Track Meta + Prev / Play / Next Glisse Buttons
                 ui.horizontal(|ui| {
@@ -1705,6 +1718,13 @@ impl NadaApp {
                             ui.painter()
                                 .rect_filled(cov_rect, CornerRadius::same(8), SURFACE_CARD);
                         }
+                        // Crisp glass catchlight rim around album art
+                        ui.painter().rect_stroke(
+                            cov_rect,
+                            CornerRadius::same(8),
+                            Stroke::new(1.0, Color32::from_rgba_unmultiplied(255, 255, 255, 42)),
+                            StrokeKind::Inside,
+                        );
                     }
 
                     let meta_w = (ui.available_width() - 128.0).max(80.0);
@@ -1933,6 +1953,97 @@ impl NadaApp {
                         }
                     });
                 });
+                    });
+
+                let dock_rect = inner.response.rect;
+                let radius = CornerRadius::same(18);
+                let mut glass_shapes: Vec<Shape> = Vec::with_capacity(8);
+
+                // 1. Soft diffuse drop shadow grounding the floating glass dock
+                glass_shapes.push(Shape::rect_filled(
+                    dock_rect.expand(1.5).translate(Vec2::new(0.0, 3.0)),
+                    CornerRadius::same(19),
+                    Color32::from_rgba_unmultiplied(0, 0, 0, 115),
+                ));
+
+                // 2. High-legibility smoked dark frosted glass body (not overly transparent)
+                glass_shapes.push(Shape::rect_filled(
+                    dock_rect,
+                    radius,
+                    Color32::from_rgba_unmultiplied(24, 25, 35, 244),
+                ));
+
+                // 3. Upper optical luminance veil (subtle cool-white frosted glass dome)
+                let top_veil = Rect::from_min_max(
+                    dock_rect.min,
+                    Pos2::new(dock_rect.right(), dock_rect.top() + dock_rect.height() * 0.48),
+                );
+                glass_shapes.push(Shape::rect_filled(
+                    top_veil,
+                    CornerRadius {
+                        nw: 18,
+                        ne: 18,
+                        sw: 4,
+                        se: 4,
+                    },
+                    Color32::from_rgba_unmultiplied(214, 224, 255, 16),
+                ));
+
+                // 4. Inner crown specular sheen near the top edge
+                let crown_rect = Rect::from_min_max(
+                    Pos2::new(dock_rect.left() + 2.0, dock_rect.top() + 1.5),
+                    Pos2::new(dock_rect.right() - 2.0, dock_rect.top() + dock_rect.height() * 0.22),
+                );
+                glass_shapes.push(Shape::rect_filled(
+                    crown_rect,
+                    CornerRadius {
+                        nw: 16,
+                        ne: 16,
+                        sw: 8,
+                        se: 8,
+                    },
+                    Color32::from_rgba_unmultiplied(255, 255, 255, 12),
+                ));
+
+                // 5. Subtle warm brass ambient bloom on the bottom-right control side
+                let bloom_center = Pos2::new(dock_rect.right() - 78.0, dock_rect.center().y + 4.0);
+                glass_shapes.push(Shape::circle_filled(
+                    bloom_center,
+                    46.0,
+                    Color32::from_rgba_unmultiplied(217, 119, 6, 18),
+                ));
+
+                // 6. Dual-angle specular rim lighting (outer crisp rim + inner bevel)
+                glass_shapes.push(Shape::rect_stroke(
+                    dock_rect,
+                    radius,
+                    Stroke::new(1.0, Color32::from_rgba_unmultiplied(255, 255, 255, 42)),
+                    StrokeKind::Inside,
+                ));
+                glass_shapes.push(Shape::rect_stroke(
+                    dock_rect.shrink(1.0),
+                    CornerRadius::same(17),
+                    Stroke::new(0.75, Color32::from_rgba_unmultiplied(255, 255, 255, 16)),
+                    StrokeKind::Inside,
+                ));
+
+                // 7. Directional top-left catchlight & subtle warm bottom-right bounce
+                glass_shapes.push(Shape::line_segment(
+                    [
+                        Pos2::new(dock_rect.left() + 18.0, dock_rect.top() + 1.0),
+                        Pos2::new(dock_rect.right() - 18.0, dock_rect.top() + 1.0),
+                    ],
+                    Stroke::new(1.15, Color32::from_rgba_unmultiplied(255, 255, 255, 96)),
+                ));
+                glass_shapes.push(Shape::line_segment(
+                    [
+                        Pos2::new(dock_rect.left() + 26.0, dock_rect.bottom() - 1.0),
+                        Pos2::new(dock_rect.right() - 26.0, dock_rect.bottom() - 1.0),
+                    ],
+                    Stroke::new(0.9, Color32::from_rgba_unmultiplied(245, 180, 90, 44)),
+                ));
+
+                ui.painter().set(bg_shape_idx, Shape::Vec(glass_shapes));
             });
     }
 
@@ -2110,7 +2221,7 @@ impl NadaApp {
                                         .max_rect(text_rect)
                                         .layout(Layout::top_down(Align::Min)),
                                 );
-                                text_ui.set_clip_rect(text_rect);
+                                text_ui.set_clip_rect(text_rect.intersect(ui.clip_rect()));
                                 text_ui.spacing_mut().item_spacing.y = 1.0;
                                 text_ui.add(
                                     egui::Label::new(
@@ -2275,7 +2386,7 @@ impl NadaApp {
                     .max_rect(text_rect)
                     .layout(Layout::top_down(Align::Min)),
             );
-            text_ui.set_clip_rect(text_rect);
+            text_ui.set_clip_rect(text_rect.intersect(ui.clip_rect()));
             let title_col = if is_playing { ACCENT_GOLD } else { TEXT_MAIN };
             text_ui.add(
                 egui::Label::new(RichText::new(&track.name).strong().size(13.0).color(title_col))
@@ -2373,7 +2484,7 @@ impl NadaApp {
                                             .max_rect(row_rect)
                                             .layout(Layout::top_down(Align::Min)),
                                     );
-                                    row_ui.set_clip_rect(row_rect);
+                                    row_ui.set_clip_rect(row_rect.intersect(ui.clip_rect()));
                                     row_ui.add(
                                         egui::Label::new(
                                             RichText::new(&t.name)
@@ -2414,7 +2525,7 @@ impl NadaApp {
         let screen = ctx.content_rect();
         egui::Area::new(Id::unique("toast_overlay"))
             .order(Order::Tooltip)
-            .anchor(egui::Align2::CENTER_BOTTOM, Vec2::new(0.0, -138.0))
+            .anchor(egui::Align2::CENTER_BOTTOM, Vec2::new(0.0, -154.0))
             .constrain_to(screen)
             .show(ctx, |ui| {
                 Frame::new()

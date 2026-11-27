@@ -142,7 +142,7 @@ pub fn wrap_async_script(script_body: &str, cb_url: &str) -> String {
       await fetch(__cb, {{
         method: "POST",
         headers: {{ "content-type": "application/json" }},
-        body: JSON.stringify({{ ok: false, error: String(__err && (__err.stack || __err.message || __err)) }})
+        body: JSON.stringify({{ ok: false, error: __err ? ((__err.message || String(__err)) + (__err.stack ? "\n" + __err.stack : "")) : "unknown JS error" }})
       }});
     }} catch (_) {{}}
   }}
@@ -178,7 +178,7 @@ pub fn parse_sync_json_result(raw: &str) -> Result<Value, String> {
     Ok(val)
 }
 
-const QUICKJS_POLYFILLS: &str = r#"
+const QUICKJS_POLYFILLS: &str = r##"
 (() => {
   const g = globalThis;
   g.window = g;
@@ -198,63 +198,126 @@ const QUICKJS_POLYFILLS: &str = r#"
   };
   g.navigator = {
     userAgent: "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36",
+    appVersion: "5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36",
+    appName: "Netscape",
+    appCodeName: "Mozilla",
+    product: "Gecko",
+    productSub: "20030107",
     language: "en-US",
     languages: ["en-US", "en"],
     platform: "Win32",
     vendor: "Google Inc.",
+    vendorSub: "",
     onLine: true,
     hardwareConcurrency: 8,
     deviceMemory: 8,
     webdriver: false,
     maxTouchPoints: 0,
-    cookieEnabled: true
+    cookieEnabled: true,
+    plugins: [],
+    mimeTypes: [],
+    javaEnabled() { return false; }
   };
   g.screen = { width: 1920, height: 1080, availWidth: 1920, availHeight: 1040, colorDepth: 24, pixelDepth: 24 };
+  g.history = { length: 1, state: null, back() {}, forward() {}, go() {}, pushState() {}, replaceState() {} };
+  const makeStorage = () => {
+    const m = Object.create(null);
+    return {
+      getItem(k) { return Object.prototype.hasOwnProperty.call(m, k) ? m[k] : null; },
+      setItem(k, v) { m[String(k)] = String(v); },
+      removeItem(k) { delete m[String(k)]; },
+      clear() { for (const k of Object.keys(m)) delete m[k]; },
+      get length() { return Object.keys(m).length; },
+      key(i) { return Object.keys(m)[i] ?? null; }
+    };
+  };
+  g.localStorage = makeStorage();
+  g.sessionStorage = makeStorage();
   g.devicePixelRatio = 1;
-  g.innerWidth = 430;
-  g.innerHeight = 640;
-  g.outerWidth = 430;
-  g.outerHeight = 640;
+  g.innerWidth = 1280;
+  g.innerHeight = 720;
+  g.outerWidth = 1280;
+  g.outerHeight = 800;
   g.performance = {
     timeOrigin: Date.now(),
-    now() { return Date.now() - this.timeOrigin; }
+    now() { return Date.now() - this.timeOrigin; },
+    timing: { navigationStart: Date.now() - 1000 }
   };
   function makeEl(tag) {
-    return {
+    const el = {
       tagName: String(tag || "DIV").toUpperCase(),
+      nodeName: String(tag || "DIV").toUpperCase(),
       nodeType: 1,
-      style: {},
+      style: { setProperty() {}, getPropertyValue() { return ""; }, removeProperty() {} },
+      classList: { add() {}, remove() {}, contains() { return false; }, toggle() { return false; } },
       children: [],
       childNodes: [],
       dataset: {},
-      appendChild(c) { this.children.push(c); return c; },
+      attributes: [],
+      parentNode: null,
+      parentElement: null,
+      ownerDocument: null,
+      contentWindow: null,
+      contentDocument: null,
+      innerHTML: "",
+      textContent: "",
+      width: 300,
+      height: 150,
+      clientWidth: 300,
+      clientHeight: 150,
+      offsetWidth: 300,
+      offsetHeight: 150,
+      getBoundingClientRect() { return { top: 0, left: 0, bottom: 150, right: 300, width: 300, height: 150, x: 0, y: 0 }; },
+      appendChild(c) { if (c && typeof c === "object") { c.parentNode = this; c.parentElement = this; } this.children.push(c); this.childNodes.push(c); return c; },
       removeChild(c) { return c; },
-      insertBefore(c) { this.children.push(c); return c; },
-      setAttribute(k, v) { this[k] = v; },
+      insertBefore(c) { if (c && typeof c === "object") { c.parentNode = this; c.parentElement = this; } this.children.push(c); this.childNodes.push(c); return c; },
+      setAttribute(k, v) { this[k] = String(v); },
       getAttribute(k) { return this[k] ?? null; },
+      hasAttribute(k) { return k in this; },
       removeAttribute(k) { delete this[k]; },
       addEventListener() {},
       removeEventListener() {},
+      dispatchEvent() { return true; },
       getElementsByTagName() { return []; },
       querySelector() { return null; },
       querySelectorAll() { return []; },
       cloneNode() { return makeEl(tag); },
       getContext() {
         return {
-          fillRect() {}, clearRect() {}, getImageData() { return { data: new Uint8ClampedArray(16) }; },
-          putImageData() {}, fillText() {}, measureText() { return { width: 10 }; },
-          beginPath() {}, arc() {}, fill() {}, stroke() {}, closePath() {}
+          canvas: null,
+          fillStyle: "#000",
+          strokeStyle: "#000",
+          font: "10px sans-serif",
+          textBaseline: "alphabetic",
+          globalCompositeOperation: "source-over",
+          fillRect() {}, clearRect() {}, strokeRect() {},
+          getImageData() { return { data: new Uint8ClampedArray(16), width: 2, height: 2 }; },
+          putImageData() {}, fillText() {}, strokeText() {},
+          measureText() { return { width: 10 }; },
+          beginPath() {}, arc() {}, moveTo() {}, lineTo() {}, rect() {}, fill() {}, stroke() {}, closePath() {},
+          save() {}, restore() {}, translate() {}, rotate() {}, scale() {}, transform() {}, setTransform() {},
+          isPointInPath() { return false; }
         };
       },
       toDataURL() { return "data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNk+M9QDwADhgGAWjR9awAAAABJRU5ErkJggg=="; }
     };
+    if (el.tagName === "IFRAME") {
+      el.contentWindow = g;
+      el.contentDocument = g.document;
+    }
+    return el;
   }
   const docEl = makeEl("html");
   const headEl = makeEl("head");
   const bodyEl = makeEl("body");
   g.document = {
     nodeType: 9,
+    nodeName: "#document",
     readyState: "complete",
+    compatMode: "CSS1Compat",
+    characterSet: "UTF-8",
+    charset: "UTF-8",
+    contentType: "text/html",
     URL: g.location.href,
     documentURI: g.location.href,
     domain: "www.youtube.com",
@@ -263,13 +326,22 @@ const QUICKJS_POLYFILLS: &str = r#"
     title: "",
     hidden: false,
     visibilityState: "visible",
+    defaultView: g,
     location: g.location,
     documentElement: docEl,
     head: headEl,
     body: bodyEl,
-    createElement(t) { return makeEl(t); },
-    createElementNS(_ns, t) { return makeEl(t); },
-    createTextNode(t) { return { nodeType: 3, textContent: String(t) }; },
+    activeElement: bodyEl,
+    currentScript: null,
+    scripts: [],
+    images: [],
+    forms: [],
+    links: [],
+    styleSheets: [],
+    hasFocus() { return true; },
+    createElement(t) { const el = makeEl(t); el.ownerDocument = g.document; return el; },
+    createElementNS(_ns, t) { const el = makeEl(t); el.ownerDocument = g.document; return el; },
+    createTextNode(t) { return { nodeType: 3, nodeName: "#text", textContent: String(t), ownerDocument: g.document }; },
     createDocumentFragment() { return makeEl("fragment"); },
     createEvent() { return { initEvent() {} }; },
     getElementById() { return null; },
@@ -277,37 +349,123 @@ const QUICKJS_POLYFILLS: &str = r#"
       const u = String(t || "").toLowerCase();
       if (u === "head") return [headEl];
       if (u === "body") return [bodyEl];
+      if (u === "html") return [docEl];
       return [];
     },
     getElementsByClassName() { return []; },
     querySelector(s) {
       if (s === "head") return headEl;
       if (s === "body") return bodyEl;
+      if (s === "html") return docEl;
       return null;
     },
     querySelectorAll() { return []; },
     addEventListener() {},
-    removeEventListener() {}
+    removeEventListener() {},
+    dispatchEvent() { return true; }
   };
+  docEl.ownerDocument = g.document;
+  headEl.ownerDocument = g.document;
+  bodyEl.ownerDocument = g.document;
+  g.EventTarget = function EventTarget() {};
+  g.Window = function Window() {};
+  g.Document = function Document() {};
+  g.HTMLDocument = function HTMLDocument() {};
   g.Element = function Element() {};
   g.HTMLElement = function HTMLElement() {};
+  g.HTMLCanvasElement = function HTMLCanvasElement() {};
+  g.HTMLIFrameElement = function HTMLIFrameElement() {};
   g.Node = function Node() {};
   g.Event = function Event(t) { this.type = t; };
   g.CustomEvent = function CustomEvent(t, o) { this.type = t; this.detail = o && o.detail; };
   g.MutationObserver = function MutationObserver() { this.observe = () => {}; this.disconnect = () => {}; };
   g.XMLHttpRequest = function XMLHttpRequest() {};
+  g.MessageChannel = class MessageChannel {
+    constructor() {
+      const ch = this;
+      this.port1 = {
+        onmessage: null,
+        postMessage(data) {
+          Promise.resolve().then(() => {
+            if (typeof ch.port2.onmessage === "function") ch.port2.onmessage({ data });
+          });
+        },
+        start() {}, close() {}
+      };
+      this.port2 = {
+        onmessage: null,
+        postMessage(data) {
+          Promise.resolve().then(() => {
+            if (typeof ch.port1.onmessage === "function") ch.port1.onmessage({ data });
+          });
+        },
+        start() {}, close() {}
+      };
+    }
+  };
+  g.URLSearchParams = class URLSearchParams {
+    constructor(init) {
+      this._p = [];
+      if (typeof init === "string") {
+        const s = init.startsWith("?") ? init.slice(1) : init;
+        for (const part of s.split("&")) {
+          if (!part) continue;
+          const idx = part.indexOf("=");
+          if (idx < 0) this._p.push([decodeURIComponent(part.replace(/\+/g, " ")), ""]);
+          else this._p.push([decodeURIComponent(part.slice(0, idx).replace(/\+/g, " ")), decodeURIComponent(part.slice(idx + 1).replace(/\+/g, " "))]);
+        }
+      }
+    }
+    get(k) { const f = this._p.find(x => x[0] === k); return f ? f[1] : null; }
+    set(k, v) { this.delete(k); this._p.push([String(k), String(v)]); }
+    append(k, v) { this._p.push([String(k), String(v)]); }
+    delete(k) { this._p = this._p.filter(x => x[0] !== k); }
+    has(k) { return this._p.some(x => x[0] === k); }
+    toString() { return this._p.map(([k, v]) => encodeURIComponent(k) + "=" + encodeURIComponent(v)).join("&"); }
+    forEach(cb) { for (const [k, v] of this._p) cb(v, k, this); }
+  };
+  g.URL = class URL {
+    constructor(url, base) {
+      let s = String(url);
+      if (base && !/^[a-zA-Z][a-zA-Z0-9+.-]*:/.test(s)) {
+        const b = String(base);
+        const m = b.match(/^([a-zA-Z]+:\/\/[^/?#]+)/);
+        if (m) s = s.startsWith("/") ? m[1] + s : m[1] + "/" + s;
+      }
+      const m = s.match(/^([a-zA-Z]+:)\/\/([^/?#]*)([^?#]*)(\?[^#]*)?(#.*)?$/);
+      if (!m) throw new TypeError("Invalid URL: " + s);
+      this.protocol = m[1];
+      this.host = m[2];
+      const hp = this.host.split(":");
+      this.hostname = hp[0];
+      this.port = hp[1] || "";
+      this.origin = this.protocol + "//" + this.host;
+      this.pathname = m[3] || "/";
+      this.search = m[4] || "";
+      this.hash = m[5] || "";
+      this.searchParams = new g.URLSearchParams(this.search);
+    }
+    get href() {
+      const sp = this.searchParams.toString();
+      return this.origin + this.pathname + (sp ? "?" + sp : "") + this.hash;
+    }
+    toString() { return this.href; }
+  };
   g.addEventListener = function () {};
   g.removeEventListener = function () {};
   g.postMessage = function () {};
-  g.setTimeout = function (fn) {
-    if (typeof fn === "function") Promise.resolve().then(() => { try { fn(); } catch (_) {} });
+  g.getComputedStyle = function () { return { getPropertyValue() { return ""; } }; };
+  g.matchMedia = function () { return { matches: false, addListener() {}, removeListener() {} }; };
+  g.__nada_errs = [];
+  g.setTimeout = function (fn, _delay, ...args) {
+    if (typeof fn === "function") Promise.resolve().then(() => { try { fn(...args); } catch (e) { g.__nada_errs.push("setTimeout: " + (e && e.message ? e.message : String(e))); } });
     return 1;
   };
   g.clearTimeout = function () {};
   g.setInterval = function () { return 1; };
   g.clearInterval = function () {};
   g.requestAnimationFrame = function (fn) {
-    if (typeof fn === "function") Promise.resolve().then(() => { try { fn(g.performance.now()); } catch (_) {} });
+    if (typeof fn === "function") Promise.resolve().then(() => { try { fn(g.performance.now()); } catch (e) { g.__nada_errs.push("rAF: " + (e && e.message ? e.message : String(e))); } });
     return 1;
   };
   g.cancelAnimationFrame = function () {};
@@ -426,7 +584,7 @@ const QUICKJS_POLYFILLS: &str = r#"
     };
   };
 })();
-"#;
+"##;
 
 enum QjsCmd {
     EvalAsync(String, Duration, mpsc::Sender<Result<Value, String>>),
@@ -648,6 +806,323 @@ impl JsHost for QuickJsHost {
     }
 }
 
+#[cfg(windows)]
+mod win_webview2 {
+    use super::*;
+    use raw_window_handle::{HasWindowHandle, RawWindowHandle, Win32WindowHandle, WindowHandle};
+    use std::path::PathBuf;
+    use windows_sys::Win32::System::Com::{CoInitializeEx, COINIT_APARTMENTTHREADED};
+    use windows_sys::Win32::System::LibraryLoader::GetModuleHandleW;
+    use windows_sys::Win32::UI::WindowsAndMessaging::{
+        CreateWindowExW, DefWindowProcW, DestroyWindow, DispatchMessageW, PeekMessageW,
+        RegisterClassW, TranslateMessage, MSG, PM_REMOVE, WNDCLASSW, WS_EX_NOACTIVATE,
+        WS_EX_TOOLWINDOW, WS_POPUP,
+    };
+
+    struct RawHwnd(isize);
+
+    impl HasWindowHandle for RawHwnd {
+        fn window_handle(&self) -> Result<WindowHandle<'_>, raw_window_handle::HandleError> {
+            let nz = std::num::NonZeroIsize::new(self.0)
+                .ok_or(raw_window_handle::HandleError::Unavailable)?;
+            let handle = Win32WindowHandle::new(nz);
+            Ok(unsafe { WindowHandle::borrow_raw(RawWindowHandle::Win32(handle)) })
+        }
+    }
+
+    fn pump_messages() {
+        let mut msg: MSG = unsafe { std::mem::zeroed() };
+        while unsafe { PeekMessageW(&mut msg, std::ptr::null_mut(), 0, 0, PM_REMOVE) } != 0 {
+            unsafe {
+                TranslateMessage(&msg);
+                DispatchMessageW(&msg);
+            }
+        }
+    }
+
+    fn wait_ready_pumping(
+        webview: &wry::WebView,
+        loaded: &AtomicBool,
+        timeout: Duration,
+    ) -> Result<(), String> {
+        if loaded.load(Ordering::Acquire) {
+            return Ok(());
+        }
+        let started = Instant::now();
+        let deadline = started + timeout;
+        let mut last_probe = Instant::now() - Duration::from_secs(5);
+        while Instant::now() < deadline {
+            pump_messages();
+            if loaded.load(Ordering::Acquire) {
+                return Ok(());
+            }
+            if started.elapsed() >= Duration::from_secs(2)
+                && last_probe.elapsed() >= Duration::from_millis(600)
+            {
+                last_probe = Instant::now();
+                let (tx, rx) = mpsc::channel();
+                let cell = Arc::new(Mutex::new(Some(tx)));
+                if webview
+                    .evaluate_script_with_callback(
+                        "JSON.stringify({ ready: document.readyState === 'complete', host: String(location.hostname || '') })",
+                        move |res| {
+                            if let Some(s) = cell.lock().unwrap().take() {
+                                let _ = s.send(res);
+                            }
+                        },
+                    )
+                    .is_ok()
+                {
+                    let probe_deadline = Instant::now() + Duration::from_millis(300);
+                    while Instant::now() < probe_deadline {
+                        pump_messages();
+                        if let Ok(raw) = rx.try_recv() {
+                            if let Ok(val) = parse_sync_json_result(&raw) {
+                                let ready =
+                                    val.get("ready").and_then(Value::as_bool).unwrap_or(false);
+                                let host =
+                                    val.get("host").and_then(Value::as_str).unwrap_or("");
+                                if ready && host.ends_with("youtube.com") {
+                                    loaded.store(true, Ordering::Release);
+                                    return Ok(());
+                                }
+                            }
+                            break;
+                        }
+                        std::thread::sleep(Duration::from_millis(5));
+                    }
+                }
+            }
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        Err("timed out waiting for hidden WebView2 page load".to_string())
+    }
+
+    pub struct WebView2JsHost {
+        tx: mpsc::Sender<QjsCmd>,
+    }
+
+    impl WebView2JsHost {
+        pub fn start(data_dir: PathBuf) -> Result<Self, String> {
+            let (tx, rx) = mpsc::channel::<QjsCmd>();
+            let (init_tx, init_rx) = mpsc::channel::<Result<(), String>>();
+
+            std::thread::Builder::new()
+                .name("nada-webview2-host".to_string())
+                .spawn(move || {
+                    unsafe {
+                        let _ = CoInitializeEx(std::ptr::null(), COINIT_APARTMENTTHREADED as u32);
+                    }
+
+                    let class_name: Vec<u16> = "NadaBgWebViewHost\0".encode_utf16().collect();
+                    let hinstance = unsafe { GetModuleHandleW(std::ptr::null()) };
+                    let wc = WNDCLASSW {
+                        style: 0,
+                        lpfnWndProc: Some(DefWindowProcW),
+                        cbClsExtra: 0,
+                        cbWndExtra: 0,
+                        hInstance: hinstance,
+                        hIcon: std::ptr::null_mut(),
+                        hCursor: std::ptr::null_mut(),
+                        hbrBackground: std::ptr::null_mut(),
+                        lpszMenuName: std::ptr::null(),
+                        lpszClassName: class_name.as_ptr(),
+                    };
+                    unsafe {
+                        RegisterClassW(&wc);
+                    }
+                    let hwnd = unsafe {
+                        CreateWindowExW(
+                            WS_EX_TOOLWINDOW | WS_EX_NOACTIVATE,
+                            class_name.as_ptr(),
+                            class_name.as_ptr(),
+                            WS_POPUP,
+                            0,
+                            0,
+                            1,
+                            1,
+                            std::ptr::null_mut(),
+                            std::ptr::null_mut(),
+                            hinstance,
+                            std::ptr::null(),
+                        )
+                    };
+                    if hwnd.is_null() {
+                        let _ = init_tx.send(Err("CreateWindowExW failed for WebView2 host".into()));
+                        return;
+                    }
+
+                    let bridge = match CallbackBridge::start() {
+                        Ok(b) => b,
+                        Err(e) => {
+                            unsafe { DestroyWindow(hwnd); }
+                            let _ = init_tx.send(Err(e));
+                            return;
+                        }
+                    };
+
+                    let _ = std::fs::create_dir_all(&data_dir);
+                    let mut web_ctx = wry::WebContext::new(Some(data_dir));
+                    let loaded = Arc::new(AtomicBool::new(false));
+                    let loaded_cb = Arc::clone(&loaded);
+
+                    let raw_hwnd = RawHwnd(hwnd as isize);
+                    let webview = match wry::WebViewBuilder::new_with_web_context(&mut web_ctx)
+                        .with_url("https://www.youtube.com/robots.txt")
+                        .with_visible(false)
+                        .with_on_page_load_handler(move |ev, url| {
+                            if matches!(ev, wry::PageLoadEvent::Finished)
+                                && url.contains("youtube.com")
+                            {
+                                loaded_cb.store(true, Ordering::Release);
+                            }
+                        })
+                        .build(&raw_hwnd)
+                    {
+                        Ok(wv) => wv,
+                        Err(e) => {
+                            unsafe { DestroyWindow(hwnd); }
+                            let _ = init_tx.send(Err(format!("WebView2 build failed: {e}")));
+                            return;
+                        }
+                    };
+
+                    let _ = init_tx.send(Ok(()));
+
+                    loop {
+                        pump_messages();
+                        match rx.try_recv() {
+                            Ok(QjsCmd::EvalAsync(script_body, timeout, reply)) => {
+                                if let Err(e) =
+                                    wait_ready_pumping(&webview, &loaded, Duration::from_secs(30))
+                                {
+                                    let _ = reply.send(Err(e));
+                                    continue;
+                                }
+                                let (req_id, cb_url, cb_rx) = bridge.register();
+                                let wrapped = wrap_async_script(&script_body, &cb_url);
+                                if let Err(e) = webview.evaluate_script(&wrapped) {
+                                    bridge.cancel(&req_id);
+                                    let _ = reply.send(Err(format!("webview eval failed: {e}")));
+                                    continue;
+                                }
+                                let deadline = Instant::now() + timeout;
+                                loop {
+                                    pump_messages();
+                                    if let Ok(raw) = cb_rx.try_recv() {
+                                        let _ = reply.send(unwrap_callback_payload(&raw));
+                                        break;
+                                    }
+                                    if Instant::now() >= deadline {
+                                        bridge.cancel(&req_id);
+                                        let _ = reply.send(Err(
+                                            "WebView2 async callback timed out".to_string(),
+                                        ));
+                                        break;
+                                    }
+                                    std::thread::sleep(Duration::from_millis(5));
+                                }
+                            }
+                            Ok(QjsCmd::EvalSync(expr, timeout, reply)) => {
+                                if let Err(e) =
+                                    wait_ready_pumping(&webview, &loaded, Duration::from_secs(30))
+                                {
+                                    let _ = reply.send(Err(e));
+                                    continue;
+                                }
+                                let (cb_tx, cb_rx) = mpsc::channel();
+                                let cell = Arc::new(Mutex::new(Some(cb_tx)));
+                                let wrapped = format!("JSON.stringify({expr})");
+                                if let Err(e) = webview.evaluate_script_with_callback(
+                                    &wrapped,
+                                    move |res| {
+                                        if let Some(s) = cell.lock().unwrap().take() {
+                                            let _ = s.send(res);
+                                        }
+                                    },
+                                ) {
+                                    let _ = reply.send(Err(format!(
+                                        "webview eval_with_callback failed: {e}"
+                                    )));
+                                    continue;
+                                }
+                                let deadline = Instant::now() + timeout;
+                                loop {
+                                    pump_messages();
+                                    if let Ok(raw) = cb_rx.try_recv() {
+                                        let _ = reply.send(parse_sync_json_result(&raw));
+                                        break;
+                                    }
+                                    if Instant::now() >= deadline {
+                                        let _ = reply.send(Err(
+                                            "WebView2 sync callback timed out".to_string(),
+                                        ));
+                                        break;
+                                    }
+                                    std::thread::sleep(Duration::from_millis(5));
+                                }
+                            }
+                            Err(mpsc::TryRecvError::Empty) => {
+                                std::thread::sleep(Duration::from_millis(5));
+                            }
+                            Err(mpsc::TryRecvError::Disconnected) => break,
+                        }
+                    }
+
+                    drop(webview);
+                    unsafe {
+                        DestroyWindow(hwnd);
+                    }
+                })
+                .map_err(|e| format!("failed to spawn WebView2 host thread: {e}"))?;
+
+            init_rx
+                .recv_timeout(Duration::from_secs(15))
+                .map_err(|e| format!("WebView2 host init timeout: {e}"))??;
+
+            Ok(Self { tx })
+        }
+    }
+
+    impl JsHost for WebView2JsHost {
+        fn eval_async_json(&self, script_body: &str, timeout: Duration) -> Result<Value, String> {
+            let (reply_tx, reply_rx) = mpsc::channel();
+            self.tx
+                .send(QjsCmd::EvalAsync(script_body.to_string(), timeout, reply_tx))
+                .map_err(|e| format!("WebView2JsHost send failed: {e}"))?;
+            reply_rx
+                .recv_timeout(timeout + Duration::from_secs(35))
+                .map_err(|e| format!("WebView2JsHost async recv timeout: {e}"))?
+        }
+
+        fn eval_sync_json(&self, expr: &str, timeout: Duration) -> Result<Value, String> {
+            let (reply_tx, reply_rx) = mpsc::channel();
+            self.tx
+                .send(QjsCmd::EvalSync(expr.to_string(), timeout, reply_tx))
+                .map_err(|e| format!("WebView2JsHost send failed: {e}"))?;
+            reply_rx
+                .recv_timeout(timeout + Duration::from_secs(35))
+                .map_err(|e| format!("WebView2JsHost sync recv timeout: {e}"))?
+        }
+    }
+}
+
+pub fn start_default_js_host(
+    storage_dir: Option<&std::path::Path>,
+) -> Result<Arc<dyn JsHost>, String> {
+    #[cfg(windows)]
+    {
+        let data_dir = storage_dir
+            .map(|p| p.join("bg_webview"))
+            .unwrap_or_else(|| std::env::temp_dir().join("nada-bg-webview"));
+        if let Ok(wv) = win_webview2::WebView2JsHost::start(data_dir) {
+            return Ok(Arc::new(wv));
+        }
+    }
+    let _ = storage_dir;
+    Ok(Arc::new(QuickJsHost::start()?))
+}
+
 #[derive(Clone, Debug)]
 pub struct VideoContext {
     pub user_agent: String,
@@ -789,9 +1264,16 @@ const gResp = await fetch("https://www.youtube.com/api/jnn/v1/GenerateIT", {
 });
 if (!gResp.ok) throw new Error("BotGuard GenerateIT HTTP " + gResp.status);
 const gJson = await gResp.json();
-if (!gJson[0] || !sigOut[0]) throw new Error("GenerateIT missing integrityToken or sigOut");
-const uw = s => Uint8Array.from(atob(s.replace(/[-_.]/g, c => ({ "-": "+", "_": "/", ".": "=" }[c]))), ch => ch.charCodeAt(0));
-window.__nada_minter = await sigOut[0](uw(gJson[0]));
+if (gJson[0] && sigOut[0]) {
+  const uw = s => Uint8Array.from(atob(s.replace(/[-_.]/g, c => ({ "-": "+", "_": "/", ".": "=" }[c]))), ch => ch.charCodeAt(0));
+  window.__nada_minter = await sigOut[0](uw(gJson[0]));
+  window.__nada_fallback_pot = null;
+} else if (typeof gJson[3] === "string" && gJson[3].length > 0) {
+  window.__nada_minter = null;
+  window.__nada_fallback_pot = gJson[3];
+} else {
+  throw new Error("GenerateIT missing integrityToken/sigOut and fallback token: gJson=" + JSON.stringify(gJson).slice(0, 200));
+}
 return { ua: navigator.userAgent, ttl: Number(gJson[1] || 43200) };
 "#;
 
@@ -951,12 +1433,17 @@ return { ua: navigator.userAgent, ttl: Number(gJson[1] || 43200) };
             serde_json::to_string(ident).map_err(|e| format!("ident encode error: {e}"))?;
         let script = format!(
             r#"
-if (typeof window.__nada_minter !== "function") throw new Error("missing __nada_minter");
-const bytes = await window.__nada_minter(new TextEncoder().encode({ident_json}));
-let s = "";
-for (let i = 0; i < bytes.length; i++) s += String.fromCharCode(bytes[i]);
-const pot = btoa(s).replace(/\+/g, "-").replace(/\//g, "_");
-return {{ pot }};
+if (typeof window.__nada_minter === "function") {{
+  const bytes = await window.__nada_minter(new TextEncoder().encode({ident_json}));
+  let s = "";
+  for (let i = 0; i < bytes.length; i++) s += String.fromCharCode(bytes[i]);
+  const pot = btoa(s).replace(/\+/g, "-").replace(/\//g, "_");
+  return {{ pot }};
+}}
+if (typeof window.__nada_fallback_pot === "string" && window.__nada_fallback_pot.length > 0) {{
+  return {{ pot: window.__nada_fallback_pot }};
+}}
+throw new Error("missing __nada_minter and __nada_fallback_pot");
 "#
         );
         let val = self.eval_async(&script, Duration::from_secs(10)).await?;

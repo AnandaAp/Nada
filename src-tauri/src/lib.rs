@@ -178,10 +178,10 @@ impl Backend {
         let proxy_log = storage_dir.join("proxy.log");
         let proxy = proxy::StreamProxy::start(proxy_log, cache_dir)?;
         let rp = RustyPipe::builder()
-            .storage_dir(storage_dir)
+            .storage_dir(&storage_dir)
             .build()
             .map_err(|e| e.to_string())?;
-        let host = Arc::new(bg_engine::QuickJsHost::start()?);
+        let host = bg_engine::start_default_js_host(Some(&storage_dir))?;
         let bg = Arc::new(bg_engine::BgEngine::new(host)?);
 
         Ok(Self { rp, proxy, bg })

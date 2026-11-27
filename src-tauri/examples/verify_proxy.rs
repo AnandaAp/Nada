@@ -1,4 +1,4 @@
-use nada::bg_engine::{BgEngine, QuickJsHost};
+use nada::bg_engine::{start_default_js_host, BgEngine};
 use nada::proxy::StreamProxy;
 use nada::streams::resolve_streams;
 use std::sync::Arc;
@@ -154,7 +154,7 @@ fn main() {
     };
 
     let proxy = StreamProxy::start(log_path.clone(), cache_dir).expect("proxy failed to start");
-    let host = Arc::new(QuickJsHost::start().expect("QuickJsHost failed to start"));
+    let host = start_default_js_host(Some(&temp_dir)).expect("JsHost failed to start");
     let bg = Arc::new(BgEngine::new(host.clone()).expect("BgEngine init failed"));
 
     let rt = tokio::runtime::Runtime::new().unwrap();

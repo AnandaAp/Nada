@@ -433,21 +433,69 @@ fn resolve_storage_dir() -> PathBuf {
 }
 
 fn load_embedded_icons() -> (Option<egui::IconData>, Option<Icon>) {
-    const ICON_PNG: &[u8] = include_bytes!("../icons/32x32.png");
-    let Ok(img) = image::load_from_memory(ICON_PNG) else {
-        return (None, None);
-    };
-    let rgba = img.to_rgba8();
-    let (w, h) = rgba.dimensions();
-    let bytes = rgba.into_raw();
+    const WINDOW_PNG: &[u8] = include_bytes!("../icons/128x128@2x.png");
+    const TRAY_PNG: &[u8] = include_bytes!("../icons/32x32.png");
 
-    let egui_icon = egui::IconData {
-        rgba: bytes.clone(),
-        width: w,
-        height: h,
+    let egui_icon = image::load_from_memory(WINDOW_PNG).ok().map(|img| {
+        let rgba = img.to_rgba8();
+        let (w, h) = rgba.dimensions();
+        egui::IconData {
+            rgba: rgba.into_raw(),
+            width: w,
+            height: h,
+        }
+    });
+
+    let tray_icon = image::load_from_memory(TRAY_PNG).ok().and_then(|img| {
+        let rgba = img.to_rgba8();
+        let (w, h) = rgba.dimensions();
+        Icon::from_rgba(rgba.into_raw(), w, h).ok()
+    });
+
+    (egui_icon, tray_icon)
+}
+
+#[cfg(windows)]
+fn apply_win32_window_icons(cc: &eframe::CreationContext<'_>) {
+    use raw_window_handle::{HasWindowHandle, RawWindowHandle};
+    use windows_sys::Win32::UI::WindowsAndMessaging::{
+        CreateIconFromResourceEx, SendMessageW, ICON_BIG, ICON_SMALL, LR_DEFAULTCOLOR, WM_SETICON,
     };
-    let tray_icon = Icon::from_rgba(bytes, w, h).ok();
-    (Some(egui_icon), tray_icon)
+
+    const WINDOW_PNG: &[u8] = include_bytes!("../icons/128x128@2x.png");
+    let Ok(wh) = cc.window_handle() else {
+        return;
+    };
+    let RawWindowHandle::Win32(h) = wh.as_raw() else {
+        return;
+    };
+    let hwnd = h.hwnd.get() as *mut core::ffi::c_void;
+    unsafe {
+        let big = CreateIconFromResourceEx(
+            WINDOW_PNG.as_ptr(),
+            WINDOW_PNG.len() as u32,
+            1,
+            0x0003_0000,
+            256,
+            256,
+            LR_DEFAULTCOLOR,
+        );
+        if !big.is_null() {
+            SendMessageW(hwnd, WM_SETICON, ICON_BIG as usize, big as isize);
+        }
+        let small = CreateIconFromResourceEx(
+            WINDOW_PNG.as_ptr(),
+            WINDOW_PNG.len() as u32,
+            1,
+            0x0003_0000,
+            32,
+            32,
+            LR_DEFAULTCOLOR,
+        );
+        if !small.is_null() {
+            SendMessageW(hwnd, WM_SETICON, ICON_SMALL as usize, small as isize);
+        }
+    }
 }
 
 fn try_wake_existing_instance(wake_port_path: &std::path::Path) {
@@ -554,6 +602,9 @@ pub fn run() {
         "Nada",
         native_options,
         Box::new(move |cc| {
+            #[cfg(windows)]
+            apply_win32_window_icons(cc);
+
             // Wake-up listener thread: restores & focuses the window when a second instance is launched.
             if let Some(listener) = wake_listener {
                 let ctx_wake = cc.egui_ctx.clone();

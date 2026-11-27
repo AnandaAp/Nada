@@ -44,7 +44,24 @@ fn main() {
         if icon_path.exists() {
             let mut res = winres::WindowsResource::new();
             res.set_icon(icon_path.to_str().unwrap_or("icons/icon.ico"));
-            let _ = res.compile();
+            // Locate Windows SDK rc.exe if not already on PATH so the PE icon resource is embedded
+            let sdk_bin_root = Path::new(r"C:\Program Files (x86)\Windows Kits\10\bin");
+            if let Ok(entries) = std::fs::read_dir(sdk_bin_root) {
+                let mut versions: Vec<_> = entries
+                    .flatten()
+                    .map(|e| e.path().join("x64"))
+                    .filter(|p| p.join("rc.exe").exists())
+                    .collect();
+                versions.sort();
+                if let Some(latest_x64) = versions.last() {
+                    if let Some(s) = latest_x64.to_str() {
+                        res.set_toolkit_path(s);
+                    }
+                }
+            }
+            if let Err(e) = res.compile() {
+                println!("cargo:warning=winres icon embedding failed: {e}");
+            }
         }
     }
 }

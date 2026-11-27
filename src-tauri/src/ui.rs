@@ -714,6 +714,7 @@ pub struct NadaApp {
     covers: HashMap<String, TextureHandle>,
     pending_covers: HashSet<String>,
     video_tex: Option<TextureHandle>,
+    video_blur_tex: Option<TextureHandle>,
     last_video_pts: f64,
     toast: Option<(String, Instant)>,
 }
@@ -806,6 +807,7 @@ impl NadaApp {
             covers: HashMap::new(),
             pending_covers: HashSet::new(),
             video_tex: None,
+            video_blur_tex: None,
             last_video_pts: -1.0,
             toast: None,
         };
@@ -929,6 +931,7 @@ impl NadaApp {
         if !self.want_video {
             self.pip_open = false;
             self.video_tex = None;
+            self.video_blur_tex = None;
         }
 
         if let Some(cb) = &self.tray_tooltip_cb {
@@ -1075,6 +1078,7 @@ impl NadaApp {
         if !self.want_video {
             self.pip_open = false;
             self.video_tex = None;
+            self.video_blur_tex = None;
         }
         if self.current_track().is_some() {
             let pos = snap.position_secs;
@@ -1276,7 +1280,7 @@ impl NadaApp {
             }
         }
 
-        // Upload latest video frame to GPU texture if PTS advanced
+        // Upload latest video frame + tiny 20x12 GPU-blurred ambient backdrop texture
         if let Some(vf) = &snap.latest_frame {
             if (vf.pts_secs - self.last_video_pts).abs() > 0.001 {
                 self.last_video_pts = vf.pts_secs;
@@ -1289,6 +1293,14 @@ impl NadaApp {
                 } else {
                     self.video_tex =
                         Some(ctx.load_texture("video_stage", color_img, TextureOptions::LINEAR));
+                }
+
+                let blur_img = make_ambient_blur_image(vf.width as usize, vf.height as usize, &vf.rgba);
+                if let Some(btex) = &mut self.video_blur_tex {
+                    btex.set(blur_img, TextureOptions::LINEAR);
+                } else {
+                    self.video_blur_tex =
+                        Some(ctx.load_texture("video_blur", blur_img, TextureOptions::LINEAR));
                 }
             }
         }
@@ -1534,21 +1546,17 @@ impl NadaApp {
             ui.allocate_exact_size(Vec2::new(w, stage_h), Sense::click());
 
         let painter = ui.painter_at(stage_rect);
-        painter.rect_filled(stage_rect, CornerRadius::ZERO, Color32::BLACK);
+        let stage_r = CornerRadius::same(12);
+        painter.rect_filled(stage_rect, stage_r, Color32::from_rgba_unmultiplied(8, 8, 12, 235));
 
         if let Some(tex) = &self.video_tex {
             let tex_size = tex.size_vec2();
             if tex_size.x > 0.0 && tex_size.y > 0.0 {
-                // 16:9 uncropped object-fit: contain
+                // 16:9 uncropped object-fit: contain with subtle rounded glass frame
                 let scale = (stage_rect.width() / tex_size.x).min(stage_rect.height() / tex_size.y);
                 let draw_size = tex_size * scale;
                 let draw_rect = Rect::from_center_size(stage_rect.center(), draw_size);
-                painter.image(
-                    tex.id(),
-                    draw_rect,
-                    Rect::from_min_max(Pos2::ZERO, Pos2::new(1.0, 1.0)),
-                    Color32::WHITE,
-                );
+                paint_rounded_image(&painter, draw_rect, tex.id(), 12);
             }
         } else {
             painter.text(
@@ -1559,6 +1567,12 @@ impl NadaApp {
                 TEXT_DIMMED,
             );
         }
+        painter.rect_stroke(
+            stage_rect,
+            stage_r,
+            Stroke::new(1.0, Color32::from_rgba_unmultiplied(255, 255, 255, 30)),
+            StrokeKind::Inside,
+        );
 
         // Right-click context menu on video stage for PiP
         stage_resp.context_menu(|ui| {
@@ -2030,12 +2044,13 @@ impl NadaApp {
                     Color32::from_rgba_unmultiplied(0, 0, 0, 96),
                 ));
 
-                // 2. Seamless frosted dark glass body (translucent enough to feel floating,
-                //    dense enough to keep controls and text razor-sharp)
+                // 2. Seamless frosted dark glass body: extra translucent during video mode
+                //    so the live blurred ambient backdrop softly glows through and around the dock
+                let dock_alpha = if self.want_video && !self.pip_open { 174 } else { 220 };
                 glass_shapes.push(Shape::rect_filled(
                     dock_rect,
                     radius,
-                    Color32::from_rgba_unmultiplied(22, 23, 33, 228),
+                    Color32::from_rgba_unmultiplied(20, 21, 30, dock_alpha),
                 ));
 
                 // 3. Crisp dual-layer specular glass rim + subtle inner bevel
@@ -2694,24 +2709,42 @@ impl eframe::App for NadaApp {
                 self.render_header(ui);
             });
 
-        if self.want_video && !self.pip_open {
-            egui::Panel::bottom("nada_video_stage")
-                .frame(Frame::new().fill(BG_STUDIO))
-                .show_separator_line(false)
-                .show(ui, |ui| {
-                    self.render_video_stage(ui);
-                    // Reserve space beneath the video stage for the floating Liquid Glass dock
-                    ui.add_space(146.0);
-                });
-        }
+        let video_inline = self.want_video && !self.pip_open;
 
         egui::CentralPanel::default()
             .frame(Frame::new().fill(BG_STUDIO))
             .show(ui, |ui| {
                 self.render_main_body(ui);
+
+                // When video is playing inline, softly blur & frost the background area outside
+                // the video stage and floating player dock using the live blurred video frame.
+                if video_inline {
+                    let body_rect = ui.max_rect();
+                    let painter = ui.painter_at(body_rect);
+                    if let Some(blur_tex) = &self.video_blur_tex {
+                        painter.image(
+                            blur_tex.id(),
+                            body_rect,
+                            Rect::from_min_max(Pos2::ZERO, Pos2::new(1.0, 1.0)),
+                            Color32::from_rgba_unmultiplied(255, 255, 255, 195),
+                        );
+                        painter.rect_filled(
+                            body_rect,
+                            CornerRadius::ZERO,
+                            Color32::from_rgba_unmultiplied(10, 11, 16, 138),
+                        );
+                    } else {
+                        painter.rect_filled(
+                            body_rect,
+                            CornerRadius::ZERO,
+                            Color32::from_rgba_unmultiplied(10, 11, 16, 170),
+                        );
+                    }
+                }
             });
 
-        // True floating Liquid Glass dock: transparent side/bottom margins reveal scrolled content behind
+        // Floating Video Stage + Liquid Glass Player Dock: transparent margins around both
+        // let the live blurred video ambient backdrop shine through cleanly.
         let screen = ctx.content_rect();
         let dock_w = (screen.width() - 20.0).max(260.0);
         egui::Area::new(Id::unique("nada_floating_dock"))
@@ -2720,6 +2753,10 @@ impl eframe::App for NadaApp {
             .constrain_to(screen)
             .show(&ctx, |ui| {
                 ui.set_width(dock_w);
+                if video_inline {
+                    self.render_video_stage(ui);
+                    ui.add_space(10.0);
+                }
                 self.render_player_dock(ui, &snap);
             });
 
@@ -2766,6 +2803,70 @@ fn configure_visuals(ctx: &egui::Context) {
     ctx.set_visuals(visuals);
     // Prevent accidental text drag/selection on track rows, cards, and queue labels
     ctx.all_styles_mut(|s| s.interaction.selectable_labels = false);
+}
+
+fn make_ambient_blur_image(src_w: usize, src_h: usize, rgba: &[u8]) -> ColorImage {
+    const BW: usize = 20;
+    const BH: usize = 12;
+    if src_w == 0 || src_h == 0 || rgba.len() < src_w * src_h * 4 {
+        return ColorImage::new([BW, BH], vec![Color32::from_rgb(18, 19, 26); BW * BH]);
+    }
+    let mut grid = vec![[0f32; 3]; BW * BH];
+    for by in 0..BH {
+        let y0 = by * src_h / BH;
+        let y1 = ((by + 1) * src_h / BH).max(y0 + 1).min(src_h);
+        for bx in 0..BW {
+            let x0 = bx * src_w / BW;
+            let x1 = ((bx + 1) * src_w / BW).max(x0 + 1).min(src_w);
+            let mut r = 0u64;
+            let mut g = 0u64;
+            let mut b = 0u64;
+            let mut n = 0u64;
+            // Sample every 4th pixel for <0.05ms CPU overhead
+            let step_y = ((y1 - y0) / 4).max(1);
+            let step_x = ((x1 - x0) / 4).max(1);
+            let mut y = y0;
+            while y < y1 {
+                let mut x = x0;
+                while x < x1 {
+                    let idx = (y * src_w + x) * 4;
+                    r += rgba[idx] as u64;
+                    g += rgba[idx + 1] as u64;
+                    b += rgba[idx + 2] as u64;
+                    n += 1;
+                    x += step_x;
+                }
+                y += step_y;
+            }
+            let denom = n.max(1) as f32;
+            grid[by * BW + bx] = [r as f32 / denom, g as f32 / denom, b as f32 / denom];
+        }
+    }
+    // Single 3x3 box blur pass over the 20x12 grid for ultra-smooth GPU bilinear ambient glow
+    let mut pixels = Vec::with_capacity(BW * BH);
+    for y in 0..BH {
+        for x in 0..BW {
+            let mut acc = [0f32; 3];
+            let mut cnt = 0f32;
+            for dy in -1i32..=1 {
+                let ny = (y as i32 + dy).clamp(0, (BH - 1) as i32) as usize;
+                for dx in -1i32..=1 {
+                    let nx = (x as i32 + dx).clamp(0, (BW - 1) as i32) as usize;
+                    let c = grid[ny * BW + nx];
+                    acc[0] += c[0];
+                    acc[1] += c[1];
+                    acc[2] += c[2];
+                    cnt += 1.0;
+                }
+            }
+            pixels.push(Color32::from_rgb(
+                (acc[0] / cnt).clamp(0.0, 255.0) as u8,
+                (acc[1] / cnt).clamp(0.0, 255.0) as u8,
+                (acc[2] / cnt).clamp(0.0, 255.0) as u8,
+            ));
+        }
+    }
+    ColorImage::new([BW, BH], pixels)
 }
 
 pub fn format_time(secs: f64) -> String {

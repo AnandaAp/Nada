@@ -2,7 +2,7 @@ use std::collections::VecDeque;
 use std::io::{self, Read, Seek, SeekFrom};
 use std::num::NonZero;
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::{mpsc, Arc, Mutex};
+use std::sync::{mpsc, Arc, Condvar, Mutex};
 use std::time::{Duration, Instant};
 
 use rodio::buffer::SamplesBuffer;
@@ -653,6 +653,62 @@ impl AudioClock {
     }
 }
 
+struct ReadySignal {
+    pair: Arc<(Mutex<bool>, Condvar)>,
+}
+
+impl ReadySignal {
+    fn new() -> Self {
+        Self {
+            pair: Arc::new((Mutex::new(false), Condvar::new())),
+        }
+    }
+
+    fn clone_signal(&self) -> Self {
+        Self {
+            pair: Arc::clone(&self.pair),
+        }
+    }
+
+    fn signal(&self) {
+        let (lock, cv) = &*self.pair;
+        let mut ready = lock.lock().unwrap();
+        if !*ready {
+            *ready = true;
+            cv.notify_all();
+        }
+    }
+
+    fn wait_or_cancel(&self, cancel: &AtomicBool, timeout: Duration) {
+        let deadline = Instant::now() + timeout;
+        let (lock, cv) = &*self.pair;
+        let mut ready = lock.lock().unwrap();
+        while !*ready && !cancel.load(Ordering::Acquire) {
+            let now = Instant::now();
+            if now >= deadline {
+                break;
+            }
+            let step = (deadline - now).min(Duration::from_millis(50));
+            let (g, _) = cv.wait_timeout(ready, step).unwrap();
+            ready = g;
+        }
+    }
+}
+
+struct ReadyGuard(ReadySignal);
+
+impl ReadyGuard {
+    fn signal(&self) {
+        self.0.signal();
+    }
+}
+
+impl Drop for ReadyGuard {
+    fn drop(&mut self) {
+        self.0.signal();
+    }
+}
+
 fn select_avc_candidates(candidates: &[StreamInput]) -> Vec<StreamInput> {
     let mut avc: Vec<StreamInput> = candidates
         .iter()
@@ -782,11 +838,15 @@ fn run_playback_session(
     // Spawn companion H.264 video decoder thread when want_video is enabled
     let (vid_seek_tx, vid_seek_rx) = mpsc::channel::<f64>();
     let mut video_active = false;
+    let mut video_ready_wait: Option<ReadySignal> = None;
     if req.want_video && has_video {
         let mut vid_pool = select_avc_candidates(&req.video_candidates);
         vid_pool.extend(select_avc_candidates(&req.muxed_candidates));
         if !vid_pool.is_empty() {
             video_active = true;
+            let ready_sig = ReadySignal::new();
+            let ready_worker = ready_sig.clone_signal();
+            video_ready_wait = Some(ready_sig);
             let clock_v = clock.clone();
             let pause_v = pause_flag.clone();
             let cancel_v = cancel.clone();
@@ -808,9 +868,18 @@ fn run_playback_session(
                         cancel_v,
                         shared_v,
                         repaint_v,
+                        ready_worker,
                     );
                 })
                 .ok();
+        }
+    }
+
+    // Hold audio start until the first video frame is decoded so A/V start in sync
+    if let Some(wait_sig) = video_ready_wait {
+        wait_sig.wait_or_cancel(&cancel, Duration::from_secs(10));
+        if cancel.load(Ordering::Acquire) {
+            return;
         }
     }
 
@@ -972,7 +1041,11 @@ fn run_video_worker(
     cancel: Arc<AtomicBool>,
     shared: Arc<Mutex<MediaSnapshot>>,
     repaint: Option<Arc<dyn Fn() + Send + Sync>>,
+    ready_sig: ReadySignal,
 ) {
+    // Always unblock audio on early exit/error so audio never hangs
+    let ready_guard = ReadyGuard(ready_sig);
+    let mut first_frame_signaled = false;
     let mut opened: Option<(Box<dyn FormatReader>, u32, Option<TimeBase>, Vec<u8>)> = None;
 
     for cand in &candidates {
@@ -1127,12 +1200,30 @@ fn run_video_worker(
                     }
                     if let Ok(Some(frame)) = h264.decode_nal(nal) {
                         let pts = pts_history.pop_front().unwrap_or(pkt_secs);
-                        let poc = frame.pic_order_cnt;
-                        frame_queue.push_back((gop_id, poc, pts, frame));
-                        if is_idr || frame_queue.len() >= 4 {
-                            let mut v: Vec<_> = frame_queue.drain(..).collect();
-                            v.sort_by_key(|(g, p, _, _)| (*g, *p));
-                            frame_queue.extend(v);
+                        if !first_frame_signaled {
+                            first_frame_signaled = true;
+                            let (w, h, rgba) = yuv_frame_to_rgba(&frame);
+                            {
+                                let mut snap = shared.lock().unwrap();
+                                if snap.session_id == session_id {
+                                    snap.latest_frame = Some(VideoRgbaFrame {
+                                        width: w,
+                                        height: h,
+                                        rgba: Arc::from(rgba),
+                                        pts_secs: pts,
+                                    });
+                                }
+                            }
+                            notify_ui(&repaint);
+                            ready_guard.signal();
+                        } else {
+                            let poc = frame.pic_order_cnt;
+                            frame_queue.push_back((gop_id, poc, pts, frame));
+                            if is_idr || frame_queue.len() >= 4 {
+                                let mut v: Vec<_> = frame_queue.drain(..).collect();
+                                v.sort_by_key(|(g, p, _, _)| (*g, *p));
+                                frame_queue.extend(v);
+                            }
                         }
                     }
                 }

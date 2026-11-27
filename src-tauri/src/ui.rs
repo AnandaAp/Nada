@@ -19,7 +19,6 @@ use crate::{Backend, HomeItem, StreamsResponse, Track};
 const BG_STUDIO: Color32 = Color32::from_rgb(17, 17, 16); // #111110
 const SURFACE_PANEL: Color32 = Color32::from_rgb(24, 24, 32); // #181820
 const SURFACE_CARD: Color32 = Color32::from_rgb(34, 34, 43); // #22222b
-const BORDER_SUBTLE: Color32 = Color32::from_rgb(50, 50, 62); // #32323e
 const TEXT_MAIN: Color32 = Color32::from_rgb(245, 245, 247); // #f5f5f7
 const TEXT_MUTED: Color32 = Color32::from_rgb(172, 172, 182); // #acacb6
 const TEXT_DIMMED: Color32 = Color32::from_rgb(148, 148, 158); // #94949e
@@ -1209,10 +1208,20 @@ impl NadaApp {
                                     mime: v.mime,
                                 })
                                 .collect();
-                            let video_candidates = streams
+                            // Prefer 360p-480p H.264 first for fast software decode on the 430px stage,
+                            // falling back to 720p when lower resolutions are unavailable.
+                            let mut video_only_sorted: Vec<_> = streams
                                 .video_only
                                 .into_iter()
                                 .filter(|v| v.height <= 720)
+                                .collect();
+                            video_only_sorted.sort_by_key(|v| {
+                                let penalty = if v.height <= 480 { 0u32 } else { 1000u32 };
+                                let pref_dist = (v.height as i32 - 360).unsigned_abs();
+                                (penalty, pref_dist)
+                            });
+                            let video_candidates = video_only_sorted
+                                .into_iter()
                                 .map(|v| StreamInput {
                                     url: v.url,
                                     mime: v.mime,
@@ -1483,6 +1492,8 @@ impl NadaApp {
                                 self.search_tab = SearchTab::Tracks;
                                 if !self.search_query.trim().is_empty() {
                                     self.trigger_search(ctx.clone());
+                                } else {
+                                    self.load_home(ctx.clone());
                                 }
                             }
 
@@ -1504,6 +1515,8 @@ impl NadaApp {
                                 self.search_tab = SearchTab::Videos;
                                 if !self.search_query.trim().is_empty() {
                                     self.trigger_search(ctx.clone());
+                                } else {
+                                    self.load_home(ctx.clone());
                                 }
                             }
                         });
@@ -2133,12 +2146,44 @@ impl NadaApp {
             ui.add_space(6.0);
 
             if shelf.loading {
+                let t = ui.input(|i| i.time) as f32;
+                ui.ctx().request_repaint();
                 ui.horizontal(|ui| {
-                    for _ in 0..3 {
+                    ui.spacing_mut().item_spacing.x = 10.0;
+                    for i in 0..3 {
+                        let phase = (t * 3.2 - i as f32 * 0.65).sin() * 0.5 + 0.5;
+                        let card_bg = lerp_color(
+                            Color32::from_rgb(24, 25, 33),
+                            Color32::from_rgb(33, 35, 46),
+                            phase,
+                        );
+                        let bone = lerp_color(
+                            Color32::from_rgb(34, 36, 48),
+                            Color32::from_rgb(54, 57, 74),
+                            phase,
+                        );
                         let (r, _) =
-                            ui.allocate_exact_size(Vec2::new(118.0, 152.0), Sense::hover());
-                        ui.painter()
-                            .rect_filled(r, CornerRadius::same(10), SURFACE_CARD);
+                            ui.allocate_exact_size(Vec2::new(122.0, 162.0), Sense::hover());
+                        let p = ui.painter();
+                        p.rect_filled(r, CornerRadius::same(12), card_bg);
+                        p.rect_stroke(
+                            r,
+                            CornerRadius::same(12),
+                            Stroke::new(1.0, Color32::from_rgba_unmultiplied(255, 255, 255, 14)),
+                            StrokeKind::Inside,
+                        );
+                        let img_r = Rect::from_min_size(r.min + Vec2::splat(8.0), Vec2::splat(106.0));
+                        p.rect_filled(img_r, CornerRadius::same(8), bone);
+                        let title_r = Rect::from_min_size(
+                            Pos2::new(r.left() + 8.0, img_r.bottom() + 9.0),
+                            Vec2::new(86.0, 10.0),
+                        );
+                        p.rect_filled(title_r, CornerRadius::same(4), bone);
+                        let sub_r = Rect::from_min_size(
+                            Pos2::new(r.left() + 8.0, title_r.bottom() + 6.0),
+                            Vec2::new(58.0, 8.0),
+                        );
+                        p.rect_filled(sub_r, CornerRadius::same(4), bone);
                     }
                 });
             } else if shelf.error.is_some() {
@@ -2292,7 +2337,7 @@ impl NadaApp {
             self.request_cover(&cov, ctx);
         }
         if let Some((tracks, idx, is_video)) = clicked_track_action {
-            self.want_video = is_video;
+            self.want_video = is_video || self.search_tab == SearchTab::Videos;
             self.set_queue(tracks, idx);
             self.start_current_track(0.0, true, ctx.clone());
         } else if let Some(col) = clicked_collection {
@@ -2712,6 +2757,8 @@ fn configure_visuals(ctx: &egui::Context) {
     visuals.widgets.hovered.bg_fill = Color32::from_rgb(52, 52, 64);
     visuals.widgets.active.bg_fill = ACCENT_BRASS;
     ctx.set_visuals(visuals);
+    // Prevent accidental text drag/selection on track rows, cards, and queue labels
+    ctx.all_styles_mut(|s| s.interaction.selectable_labels = false);
 }
 
 pub fn format_time(secs: f64) -> String {

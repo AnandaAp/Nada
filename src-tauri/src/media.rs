@@ -1,7 +1,7 @@
 use std::collections::VecDeque;
 use std::io::{self, Read, Seek, SeekFrom};
 use std::num::NonZero;
-use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{mpsc, Arc, Mutex};
 use std::time::{Duration, Instant};
 
@@ -452,6 +452,7 @@ struct ActiveWorker {
     cancel: Arc<AtomicBool>,
     seek_tx: mpsc::Sender<f64>,
     pause_flag: Arc<AtomicBool>,
+    clock: Arc<AudioClock>,
 }
 
 fn notify_ui(repaint: &Option<Arc<dyn Fn() + Send + Sync>>) {
@@ -501,11 +502,13 @@ fn run_media_coordinator(
                 let cancel = cancel_slot.lock().unwrap().clone();
                 let (seek_tx, seek_rx) = mpsc::channel::<f64>();
                 let pause_flag = Arc::new(AtomicBool::new(!req.autoplay));
+                let clock = Arc::new(AudioClock::new(req.start_pos_secs));
 
                 active = Some(ActiveWorker {
                     cancel: cancel.clone(),
                     seek_tx,
                     pause_flag: pause_flag.clone(),
+                    clock: clock.clone(),
                 });
 
                 let player_clone = player_opt.clone();
@@ -518,6 +521,7 @@ fn run_media_coordinator(
                         run_playback_session(
                             req,
                             player_clone,
+                            clock,
                             pause_flag,
                             seek_rx,
                             cancel,
@@ -530,6 +534,7 @@ fn run_media_coordinator(
             EngineCmd::SetPaused(paused) => {
                 if let Some(w) = &active {
                     w.pause_flag.store(paused, Ordering::Release);
+                    w.clock.set_paused(paused);
                 }
                 if let Some(p) = &player_opt {
                     if paused {
@@ -587,45 +592,64 @@ fn run_media_coordinator(
 // Audio + Video Decode Session (Master Audio Clock + Synchronized H.264 Stage)
 // ============================================================================
 
+struct ClockInner {
+    accumulated_secs: f64,
+    running_since: Option<Instant>,
+    started: bool,
+}
+
 struct AudioClock {
-    anchor_media_ms: AtomicU64,
-    anchor_played_ms: AtomicU64,
-    fallback_wall_ns: AtomicU64,
+    inner: Mutex<ClockInner>,
 }
 
 impl AudioClock {
     fn new(start_secs: f64) -> Self {
         Self {
-            anchor_media_ms: AtomicU64::new((start_secs.max(0.0) * 1000.0) as u64),
-            anchor_played_ms: AtomicU64::new(0),
-            fallback_wall_ns: AtomicU64::new(0),
+            inner: Mutex::new(ClockInner {
+                accumulated_secs: start_secs.max(0.0),
+                running_since: None,
+                started: false,
+            }),
         }
     }
 
-    fn reset(&self, media_secs: f64, player: &Option<Arc<Player>>) {
-        self.anchor_media_ms
-            .store((media_secs.max(0.0) * 1000.0) as u64, Ordering::Release);
-        let played = player
-            .as_ref()
-            .map(|p| p.get_pos().as_millis() as u64)
-            .unwrap_or(0);
-        self.anchor_played_ms.store(played, Ordering::Release);
-        self.fallback_wall_ns.store(0, Ordering::Release);
+    fn on_audio_pushed(&self, paused: bool) {
+        let mut g = self.inner.lock().unwrap();
+        if !g.started {
+            g.started = true;
+            if !paused {
+                g.running_since = Some(Instant::now());
+            }
+        } else if !paused && g.running_since.is_none() {
+            g.running_since = Some(Instant::now());
+        }
     }
 
-    fn current_secs(&self, player: &Option<Arc<Player>>, paused: bool, start_wall: Instant) -> f64 {
-        let base_ms = self.anchor_media_ms.load(Ordering::Acquire) as f64;
-        if let Some(p) = player {
-            let now_ms = p.get_pos().as_millis() as u64;
-            let anchor_ms = self.anchor_played_ms.load(Ordering::Acquire);
-            let delta_ms = now_ms.saturating_sub(anchor_ms) as f64;
-            return (base_ms + delta_ms) / 1000.0;
-        }
+    fn set_paused(&self, paused: bool) {
+        let mut g = self.inner.lock().unwrap();
         if paused {
-            return base_ms / 1000.0;
+            if let Some(since) = g.running_since.take() {
+                g.accumulated_secs += since.elapsed().as_secs_f64();
+            }
+        } else if g.started && g.running_since.is_none() {
+            g.running_since = Some(Instant::now());
         }
-        let elapsed_ms = start_wall.elapsed().as_millis() as f64;
-        (base_ms + elapsed_ms) / 1000.0
+    }
+
+    fn reset(&self, media_secs: f64) {
+        let mut g = self.inner.lock().unwrap();
+        g.accumulated_secs = media_secs.max(0.0);
+        g.running_since = None;
+        g.started = false;
+    }
+
+    fn current_secs(&self) -> f64 {
+        let g = self.inner.lock().unwrap();
+        let extra = g
+            .running_since
+            .map(|t| t.elapsed().as_secs_f64())
+            .unwrap_or(0.0);
+        g.accumulated_secs + extra
     }
 }
 
@@ -644,6 +668,7 @@ fn select_avc_candidates(candidates: &[StreamInput]) -> Vec<StreamInput> {
 fn run_playback_session(
     req: PlayRequest,
     player: Option<Arc<Player>>,
+    clock: Arc<AudioClock>,
     pause_flag: Arc<AtomicBool>,
     seek_rx: mpsc::Receiver<f64>,
     cancel: Arc<AtomicBool>,
@@ -752,8 +777,7 @@ fn run_playback_session(
         }
     }
 
-    let clock = Arc::new(AudioClock::new(req.start_pos_secs));
-    clock.reset(req.start_pos_secs, &player);
+    clock.reset(req.start_pos_secs);
 
     // Spawn companion H.264 video decoder thread when want_video is enabled
     let (vid_seek_tx, vid_seek_rx) = mpsc::channel::<f64>();
@@ -764,7 +788,6 @@ fn run_playback_session(
         if !vid_pool.is_empty() {
             video_active = true;
             let clock_v = clock.clone();
-            let player_v = player.clone();
             let pause_v = pause_flag.clone();
             let cancel_v = cancel.clone();
             let shared_v = shared.clone();
@@ -780,7 +803,6 @@ fn run_playback_session(
                         vid_pool,
                         start_pos,
                         clock_v,
-                        player_v,
                         pause_v,
                         vid_seek_rx,
                         cancel_v,
@@ -809,7 +831,6 @@ fn run_playback_session(
     notify_ui(&repaint);
 
     let mut interleaved: Vec<f32> = Vec::new();
-    let mut wall_clock = Instant::now();
     let mut last_ui_tick = Instant::now();
     let mut audio_eof = false;
 
@@ -838,8 +859,7 @@ fn run_playback_session(
                 );
                 audio_decoder.reset();
             }
-            wall_clock = Instant::now();
-            clock.reset(target_secs, &player);
+            clock.reset(target_secs);
             audio_eof = false;
             let _ = vid_seek_tx.send(target_secs);
             {
@@ -853,7 +873,7 @@ fn run_playback_session(
         }
 
         let is_paused = pause_flag.load(Ordering::Acquire);
-        let cur_pos = clock.current_secs(&player, is_paused, wall_clock);
+        let cur_pos = clock.current_secs();
 
         if last_ui_tick.elapsed() >= Duration::from_millis(120) {
             let mut snap = shared.lock().unwrap();
@@ -912,8 +932,10 @@ fn run_playback_session(
                                     let buf =
                                         SamplesBuffer::new(nz_ch, nz_rate, interleaved.clone());
                                     p.append(buf);
+                                    clock.on_audio_pushed(pause_flag.load(Ordering::Acquire));
                                 }
                             } else {
+                                clock.on_audio_pushed(pause_flag.load(Ordering::Acquire));
                                 let dur_ms = (interleaved.len() as u64 * 1000)
                                     / (rate as u64 * ch as u64).max(1);
                                 std::thread::sleep(Duration::from_millis(dur_ms.min(50)));
@@ -945,7 +967,6 @@ fn run_video_worker(
     candidates: Vec<StreamInput>,
     start_pos_secs: f64,
     clock: Arc<AudioClock>,
-    player: Option<Arc<Player>>,
     pause_flag: Arc<AtomicBool>,
     seek_rx: mpsc::Receiver<f64>,
     cancel: Arc<AtomicBool>,
@@ -1021,9 +1042,9 @@ fn run_video_worker(
         }
     }
 
-    let wall_clock = Instant::now();
-    let mut frame_queue: VecDeque<(i32, f64, H264Frame)> = VecDeque::new();
+    let mut frame_queue: VecDeque<(u64, i32, f64, H264Frame)> = VecDeque::new();
     let mut pts_history: VecDeque<f64> = VecDeque::new();
+    let mut gop_id: u64 = 0;
 
     while !cancel.load(Ordering::Acquire) {
         let mut seek_target: Option<f64> = None;
@@ -1033,6 +1054,7 @@ fn run_video_worker(
         if let Some(target_secs) = seek_target {
             frame_queue.clear();
             pts_history.clear();
+            gop_id = gop_id.wrapping_add(1);
             h264 = H264Decoder::new();
             feed_sps_pps(&mut h264);
             if let Some(t) = f64_to_symphonia_time(target_secs) {
@@ -1047,13 +1069,13 @@ fn run_video_worker(
         }
 
         let paused = pause_flag.load(Ordering::Acquire);
-        let audio_secs = clock.current_secs(&player, paused, wall_clock);
+        let audio_secs = clock.current_secs();
 
-        // Present ready frames in display order (sorted by pic_order_cnt within GOP)
-        if let Some((_, next_pts, _)) = frame_queue.front() {
+        // Present ready frames in display order (sorted by (gop_id, pic_order_cnt))
+        if let Some((_, _, next_pts, _)) = frame_queue.front() {
             let diff = *next_pts - audio_secs;
             if diff <= 0.020 {
-                let (_, pts, yuv) = frame_queue.pop_front().unwrap();
+                let (_, _, pts, yuv) = frame_queue.pop_front().unwrap();
                 // Skip converting late frames if > 250ms behind master audio clock and more frames queued
                 if diff >= -0.250 || frame_queue.is_empty() {
                     let (w, h, rgba) = yuv_frame_to_rgba(&yuv);
@@ -1100,18 +1122,16 @@ fn run_video_worker(
                 let nals = parse_avcc(&packet.data, length_size);
                 for nal in &nals {
                     let is_idr = nal.nal_unit_type == NalUnitType::SliceIdr;
+                    if is_idr {
+                        gop_id = gop_id.wrapping_add(1);
+                    }
                     if let Ok(Some(frame)) = h264.decode_nal(nal) {
                         let pts = pts_history.pop_front().unwrap_or(pkt_secs);
                         let poc = frame.pic_order_cnt;
-                        frame_queue.push_back((poc, pts, frame));
-                        if is_idr {
-                            // Previous GOP finished; sort queued frames by POC
+                        frame_queue.push_back((gop_id, poc, pts, frame));
+                        if is_idr || frame_queue.len() >= 4 {
                             let mut v: Vec<_> = frame_queue.drain(..).collect();
-                            v.sort_by_key(|(p, _, _)| *p);
-                            frame_queue.extend(v);
-                        } else if frame_queue.len() >= 4 {
-                            let mut v: Vec<_> = frame_queue.drain(..).collect();
-                            v.sort_by_key(|(p, _, _)| *p);
+                            v.sort_by_key(|(g, p, _, _)| (*g, *p));
                             frame_queue.extend(v);
                         }
                     }

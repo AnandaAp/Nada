@@ -458,8 +458,11 @@ fn load_embedded_icons() -> (Option<egui::IconData>, Option<Icon>) {
 #[cfg(windows)]
 fn apply_win32_window_icons(cc: &eframe::CreationContext<'_>) {
     use raw_window_handle::{HasWindowHandle, RawWindowHandle};
+    use windows_sys::Win32::System::LibraryLoader::GetModuleHandleW;
     use windows_sys::Win32::UI::WindowsAndMessaging::{
-        CreateIconFromResourceEx, SendMessageW, ICON_BIG, ICON_SMALL, LR_DEFAULTCOLOR, WM_SETICON,
+        CreateIconFromResourceEx, LoadImageW, SendMessageW, SetClassLongPtrW, GCLP_HICON,
+        GCLP_HICONSM, ICON_BIG, ICON_SMALL, IMAGE_ICON, LR_DEFAULTCOLOR, LR_DEFAULTSIZE,
+        LR_SHARED, WM_SETICON,
     };
 
     const WINDOW_PNG: &[u8] = include_bytes!("../icons/128x128@2x.png");
@@ -469,33 +472,71 @@ fn apply_win32_window_icons(cc: &eframe::CreationContext<'_>) {
     let RawWindowHandle::Win32(h) = wh.as_raw() else {
         return;
     };
-    let hwnd = h.hwnd.get() as *mut core::ffi::c_void;
-    unsafe {
-        let big = CreateIconFromResourceEx(
-            WINDOW_PNG.as_ptr(),
-            WINDOW_PNG.len() as u32,
-            1,
-            0x0003_0000,
-            256,
-            256,
-            LR_DEFAULTCOLOR,
-        );
-        if !big.is_null() {
-            SendMessageW(hwnd, WM_SETICON, ICON_BIG as usize, big as isize);
+    let hwnd_raw = h.hwnd.get();
+
+    let apply_now = move |hwnd_val: isize| {
+        let hwnd = hwnd_val as *mut core::ffi::c_void;
+        unsafe {
+            let hmod = GetModuleHandleW(std::ptr::null());
+            let mut big = LoadImageW(
+                hmod,
+                1usize as *const u16,
+                IMAGE_ICON,
+                256,
+                256,
+                LR_SHARED,
+            );
+            if big.is_null() {
+                big = LoadImageW(
+                    hmod,
+                    1usize as *const u16,
+                    IMAGE_ICON,
+                    0,
+                    0,
+                    LR_DEFAULTSIZE | LR_SHARED,
+                );
+            }
+            if big.is_null() {
+                big = CreateIconFromResourceEx(
+                    WINDOW_PNG.as_ptr(),
+                    WINDOW_PNG.len() as u32,
+                    1,
+                    0x0003_0000,
+                    256,
+                    256,
+                    LR_DEFAULTCOLOR,
+                );
+            }
+
+            let mut small = LoadImageW(
+                hmod,
+                1usize as *const u16,
+                IMAGE_ICON,
+                32,
+                32,
+                LR_SHARED,
+            );
+            if small.is_null() {
+                small = big;
+            }
+
+            if !big.is_null() {
+                SetClassLongPtrW(hwnd, GCLP_HICON, big as isize);
+                SendMessageW(hwnd, WM_SETICON, ICON_BIG as usize, big as isize);
+            }
+            if !small.is_null() {
+                SetClassLongPtrW(hwnd, GCLP_HICONSM, small as isize);
+                SendMessageW(hwnd, WM_SETICON, ICON_SMALL as usize, small as isize);
+            }
         }
-        let small = CreateIconFromResourceEx(
-            WINDOW_PNG.as_ptr(),
-            WINDOW_PNG.len() as u32,
-            1,
-            0x0003_0000,
-            32,
-            32,
-            LR_DEFAULTCOLOR,
-        );
-        if !small.is_null() {
-            SendMessageW(hwnd, WM_SETICON, ICON_SMALL as usize, small as isize);
-        }
-    }
+    };
+
+    apply_now(hwnd_raw);
+    // Re-apply shortly after first window show in case winit resets WM_SETICON during startup
+    std::thread::spawn(move || {
+        std::thread::sleep(std::time::Duration::from_millis(250));
+        apply_now(hwnd_raw);
+    });
 }
 
 fn try_wake_existing_instance(wake_port_path: &std::path::Path) {

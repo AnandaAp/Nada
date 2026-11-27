@@ -1477,62 +1477,85 @@ impl NadaApp {
 
                 ui.add_space(8.0);
 
-                // Unified Apple-style segmented Lagu / Video control capsule
-                Frame::new()
-                    .fill(SURFACE_PANEL)
-                    .stroke(Stroke::new(1.0, Color32::from_rgba_unmultiplied(255, 255, 255, 18)))
-                    .corner_radius(CornerRadius::same(16))
-                    .inner_margin(Margin::same(3))
-                    .show(ui, |ui| {
-                        ui.horizontal(|ui| {
-                            ui.spacing_mut().item_spacing.x = 2.0;
-                            let tracks_v = if self.search_tab == SearchTab::Tracks {
-                                GlisseVariant::Filled(GLASS_TERRACOTTA)
-                            } else {
-                                GlisseVariant::Ghost
-                            };
-                            if glisse_button(
-                                ui,
-                                "tab_tracks",
-                                "Lagu",
-                                Vec2::new(64.0, 24.0),
-                                tracks_v,
-                            )
-                            .clicked()
-                                && self.search_tab != SearchTab::Tracks
-                            {
-                                self.search_tab = SearchTab::Tracks;
-                                if !self.search_query.trim().is_empty() {
-                                    self.trigger_search(ctx.clone());
+                // Unified Apple-style segmented Lagu / Video control capsule + sticky Refresh button
+                ui.horizontal(|ui| {
+                    Frame::new()
+                        .fill(SURFACE_PANEL)
+                        .stroke(Stroke::new(1.0, Color32::from_rgba_unmultiplied(255, 255, 255, 18)))
+                        .corner_radius(CornerRadius::same(16))
+                        .inner_margin(Margin::same(3))
+                        .show(ui, |ui| {
+                            ui.horizontal(|ui| {
+                                ui.spacing_mut().item_spacing.x = 2.0;
+                                let tracks_v = if self.search_tab == SearchTab::Tracks {
+                                    GlisseVariant::Filled(GLASS_TERRACOTTA)
                                 } else {
-                                    self.load_home(ctx.clone());
+                                    GlisseVariant::Ghost
+                                };
+                                if glisse_button(
+                                    ui,
+                                    "tab_tracks",
+                                    "Lagu",
+                                    Vec2::new(64.0, 24.0),
+                                    tracks_v,
+                                )
+                                .clicked()
+                                    && self.search_tab != SearchTab::Tracks
+                                {
+                                    self.search_tab = SearchTab::Tracks;
+                                    if !self.search_query.trim().is_empty() {
+                                        self.trigger_search(ctx.clone());
+                                    } else {
+                                        self.load_home(ctx.clone());
+                                    }
                                 }
-                            }
 
-                            let videos_v = if self.search_tab == SearchTab::Videos {
-                                GlisseVariant::Filled(GLASS_TERRACOTTA)
-                            } else {
-                                GlisseVariant::Ghost
-                            };
-                            if glisse_button(
-                                ui,
-                                "tab_videos",
-                                "Video",
-                                Vec2::new(66.0, 24.0),
-                                videos_v,
-                            )
-                            .clicked()
-                                && self.search_tab != SearchTab::Videos
-                            {
-                                self.search_tab = SearchTab::Videos;
-                                if !self.search_query.trim().is_empty() {
-                                    self.trigger_search(ctx.clone());
+                                let videos_v = if self.search_tab == SearchTab::Videos {
+                                    GlisseVariant::Filled(GLASS_TERRACOTTA)
                                 } else {
-                                    self.load_home(ctx.clone());
+                                    GlisseVariant::Ghost
+                                };
+                                if glisse_button(
+                                    ui,
+                                    "tab_videos",
+                                    "Video",
+                                    Vec2::new(66.0, 24.0),
+                                    videos_v,
+                                )
+                                .clicked()
+                                    && self.search_tab != SearchTab::Videos
+                                {
+                                    self.search_tab = SearchTab::Videos;
+                                    if !self.search_query.trim().is_empty() {
+                                        self.trigger_search(ctx.clone());
+                                    } else {
+                                        self.load_home(ctx.clone());
+                                    }
                                 }
-                            }
+                            });
                         });
+
+                    ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                        if glisse_button(
+                            ui,
+                            "refresh_header",
+                            "Refresh",
+                            Vec2::new(68.0, 28.0),
+                            GlisseVariant::Glass,
+                        )
+                        .on_hover_text("Muat ulang")
+                        .clicked()
+                        {
+                            if self.view == ActiveView::Search
+                                && !self.search_query.trim().is_empty()
+                            {
+                                self.trigger_search(ctx.clone());
+                            } else {
+                                self.load_home(ctx.clone());
+                            }
+                        }
                     });
+                });
             });
     }
 
@@ -2108,34 +2131,19 @@ impl NadaApp {
     }
 
     fn render_home_view(&mut self, ui: &mut Ui, ctx: &egui::Context) {
-        ui.horizontal(|ui| {
-            ui.vertical(|ui| {
-                ui.label(
-                    RichText::new("DISCOVER")
-                        .monospace()
-                        .size(10.0)
-                        .color(ACCENT_GOLD),
-                );
-                ui.label(
-                    RichText::new("Mau dengerin apa?")
-                        .strong()
-                        .size(19.0)
-                        .color(TEXT_MAIN),
-                );
-            });
-            ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
-                if glisse_button(
-                    ui,
-                    "refresh_home",
-                    "Refresh",
-                    Vec2::new(68.0, 26.0),
-                    GlisseVariant::Glass,
-                )
-                .clicked()
-                {
-                    self.load_home(ctx.clone());
-                }
-            });
+        ui.vertical(|ui| {
+            ui.label(
+                RichText::new("DISCOVER")
+                    .monospace()
+                    .size(10.0)
+                    .color(ACCENT_GOLD),
+            );
+            ui.label(
+                RichText::new("Mau dengerin apa?")
+                    .strong()
+                    .size(19.0)
+                    .color(TEXT_MAIN),
+            );
         });
 
         ui.add_space(12.0);

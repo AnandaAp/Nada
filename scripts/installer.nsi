@@ -22,6 +22,18 @@ InstallDir "$LOCALAPPDATA\Programs\Nada"
 InstallDirRegKey HKCU "Software\Nada" "InstallDir"
 RequestExecutionLevel user
 Unicode True
+BrandingText "Nada Desktop Player"
+
+; Complete PE version metadata (reduces Defender / SmartScreen false-positives)
+VIProductVersion "${VERSION}.0"
+VIFileVersion "${VERSION}.0"
+VIAddVersionKey /LANG=1033 "ProductName" "Nada Desktop Player"
+VIAddVersionKey /LANG=1033 "CompanyName" "Ananda"
+VIAddVersionKey /LANG=1033 "FileDescription" "Nada Desktop Player Installer"
+VIAddVersionKey /LANG=1033 "FileVersion" "${VERSION}.0"
+VIAddVersionKey /LANG=1033 "ProductVersion" "${VERSION}"
+VIAddVersionKey /LANG=1033 "LegalCopyright" "Copyright (c) Ananda"
+VIAddVersionKey /LANG=1033 "OriginalFilename" "Nada_${VERSION}_x64-setup.exe"
 
 !define MUI_ICON "${ICON_PATH}"
 !define MUI_UNICON "${ICON_PATH}"

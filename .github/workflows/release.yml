@@ -109,7 +109,7 @@ jobs:
           $thumbprint = $env:CERT_THUMBPRINT
           $exe = (Resolve-Path "src-tauri/target/release/nada.exe").Path
           Write-Host "Signing $exe with timestamp..."
-          & $signtool sign /sha1 $thumbprint /fd SHA256 /tr http://timestamp.digicert.com /td SHA256 /d "Nada Desktop Player" $exe
+          & $signtool sign /sha1 $thumbprint /fd SHA256 /tr http://timestamp.digicert.com /td SHA256 /d "Nada Desktop Player" /du "https://github.com/AnandaAp/Nada" $exe
           if ($LASTEXITCODE -ne 0) {
             throw "SignTool failed on $exe with exit code $LASTEXITCODE"
           }
@@ -131,7 +131,7 @@ jobs:
           }
 
           Write-Host "Signing $outSetup with timestamp..."
-          & $signtool sign /sha1 $thumbprint /fd SHA256 /tr http://timestamp.digicert.com /td SHA256 /d "Nada Desktop Player Setup" $outSetup
+          & $signtool sign /sha1 $thumbprint /fd SHA256 /tr http://timestamp.digicert.com /td SHA256 /d "Nada Desktop Player Setup" /du "https://github.com/AnandaAp/Nada" $outSetup
           if ($LASTEXITCODE -ne 0) {
             throw "SignTool failed on $outSetup with exit code $LASTEXITCODE"
           }
@@ -175,6 +175,59 @@ jobs:
 
           $checksumList | Out-File -FilePath "release-extra/SHA256SUMS.txt" -Encoding utf8
 
+          # 4. Generate ready-to-submit WinGet 1.6.0 manifests (avoids browser MOTW SmartScreen)
+          if ($nsis) {
+            $tag = $env:RELEASE_TAG
+            $shaUpper = $hashNsis.ToUpper()
+            $wingetDir = "release-extra/winget"
+            New-Item -ItemType Directory -Force -Path $wingetDir | Out-Null
+
+            @"
+          # yaml-language-server: `$schema=https://aka.ms/winget-manifest.version.1.6.0.schema.json
+          PackageIdentifier: Ananda.Nada
+          PackageVersion: $version
+          DefaultLocale: en-US
+          ManifestType: version
+          ManifestVersion: 1.6.0
+          "@ -replace '(?m)^          ', '' | Out-File -FilePath "$wingetDir/Ananda.Nada.yaml" -Encoding utf8
+
+            @"
+          # yaml-language-server: `$schema=https://aka.ms/winget-manifest.installer.1.6.0.schema.json
+          PackageIdentifier: Ananda.Nada
+          PackageVersion: $version
+          InstallerType: nullsoft
+          Scope: user
+          InstallModes:
+            - interactive
+            - silent
+          UpgradeBehavior: install
+          Installers:
+            - Architecture: x64
+              InstallerUrl: https://github.com/AnandaAp/Nada/releases/download/$tag/$($nsis.Name)
+              InstallerSha256: $shaUpper
+          ManifestType: installer
+          ManifestVersion: 1.6.0
+          "@ -replace '(?m)^          ', '' | Out-File -FilePath "$wingetDir/Ananda.Nada.installer.yaml" -Encoding utf8
+
+            @"
+          # yaml-language-server: `$schema=https://aka.ms/winget-manifest.defaultLocale.1.6.0.schema.json
+          PackageIdentifier: Ananda.Nada
+          PackageVersion: $version
+          PackageLocale: en-US
+          Publisher: Ananda
+          PublisherUrl: https://github.com/AnandaAp/Nada
+          PackageName: Nada
+          PackageUrl: https://github.com/AnandaAp/Nada
+          License: MIT
+          ShortDescription: Lightweight ad-free YouTube Music & Video desktop player built in Rust.
+          ManifestType: defaultLocale
+          ManifestVersion: 1.6.0
+          "@ -replace '(?m)^          ', '' | Out-File -FilePath "$wingetDir/Ananda.Nada.locale.en-US.yaml" -Encoding utf8
+
+            Compress-Archive -Path "$wingetDir/*" -DestinationPath "release-extra/Nada-v$version-winget-manifests.zip" -Force
+            Remove-Item -Recurse -Force $wingetDir
+          }
+
       - name: Create GitHub Release & Upload Signed Assets
         uses: softprops/action-gh-release@v3
         env:
@@ -187,15 +240,19 @@ jobs:
           body: |
             ### Nada ${{ env.RELEASE_TAG }}
 
-            Pure-Rust ultra-lightweight desktop music and video player for Windows (zero WebView).
+            Lightweight ad-free YouTube Music & Video desktop player for Windows built in Rust.
 
             #### Assets included:
             - **Installer (NSIS Setup, Signed)**: `Nada_${{ env.RELEASE_VERSION }}_x64-setup.exe`
             - **Portable Version (Signed)**: `Nada-v${{ env.RELEASE_VERSION }}-windows-portable.zip`
+            - **WinGet Manifests**: `Nada-v${{ env.RELEASE_VERSION }}-winget-manifests.zip`
             - **Public Certificate**: `Nada-PublicCert.cer`
             - **Checksums**: `SHA256SUMS.txt`
+
+            > **Windows SmartScreen note**: Because this open-source release is not signed with a paid EV certificate, Windows SmartScreen may show *"Windows protected your PC"* on first run. Click **More info → Run anyway** (or verify against `SHA256SUMS.txt`).
           files: |
             release-extra/*.exe
             release-extra/Nada-*-windows-portable.zip
+            release-extra/Nada-*-winget-manifests.zip
             release-extra/Nada-PublicCert.cer
             release-extra/SHA256SUMS.txt

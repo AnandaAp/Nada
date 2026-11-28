@@ -2549,7 +2549,7 @@ impl NadaApp {
         let mut covers_needed: Vec<Option<String>> = Vec::new();
         let mut jump_to: Option<usize> = None;
 
-        egui::Area::new(Id::unique("queue_drawer"))
+        let drawer_area = egui::Area::new(Id::unique("queue_drawer"))
             .order(Order::Foreground)
             .fixed_pos(drawer_rect.min)
             .show(ctx, |ui| {
@@ -2677,6 +2677,8 @@ impl NadaApp {
                             });
                     });
             });
+        // Keep the queue sheet above the scrim even after the user clicked the scrim to dismiss it
+        ctx.move_to_top(drawer_area.response.layer_id);
 
         for c in covers_needed {
             self.request_cover(&c, ctx);

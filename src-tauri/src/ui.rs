@@ -61,8 +61,18 @@ fn paint_rounded_image(
     tex_id: egui::TextureId,
     radius: u8,
 ) {
+    paint_rounded_image_tinted(painter, rect, tex_id, radius, Color32::WHITE);
+}
+
+fn paint_rounded_image_tinted(
+    painter: &egui::Painter,
+    rect: Rect,
+    tex_id: egui::TextureId,
+    radius: u8,
+    tint: Color32,
+) {
     let uv = Rect::from_min_max(Pos2::ZERO, Pos2::new(1.0, 1.0));
-    let shape = egui::epaint::RectShape::filled(rect, CornerRadius::same(radius), Color32::WHITE)
+    let shape = egui::epaint::RectShape::filled(rect, CornerRadius::same(radius), tint)
         .with_texture(tex_id, uv);
     painter.add(Shape::Rect(shape));
 }
@@ -1560,41 +1570,53 @@ impl NadaApp {
             });
     }
 
-    fn render_video_stage(&mut self, ui: &mut Ui) {
-        if !self.want_video || self.pip_open {
+    fn render_video_stage(&mut self, ui: &mut Ui, ease: f32) {
+        if ease <= 0.005 {
             return;
         }
         let w = ui.available_width();
-        let stage_h = (w * 9.0 / 16.0).min(242.0);
+        let full_h = (w * 9.0 / 16.0).min(242.0);
+        let stage_h = (full_h * ease).max(1.0);
         let (stage_rect, stage_resp) =
             ui.allocate_exact_size(Vec2::new(w, stage_h), Sense::click());
 
         let painter = ui.painter_at(stage_rect);
         let stage_r = CornerRadius::same(12);
-        painter.rect_filled(stage_rect, stage_r, Color32::from_rgba_unmultiplied(8, 8, 12, 235));
+        let bg_a = (235.0 * ease).round() as u8;
+        painter.rect_filled(stage_rect, stage_r, Color32::from_rgba_unmultiplied(8, 8, 12, bg_a));
 
+        let img_tint = Color32::from_rgba_unmultiplied(255, 255, 255, (255.0 * ease).round() as u8);
         if let Some(tex) = &self.video_tex {
             let tex_size = tex.size_vec2();
             if tex_size.x > 0.0 && tex_size.y > 0.0 {
-                // 16:9 uncropped object-fit: contain with subtle rounded glass frame
-                let scale = (stage_rect.width() / tex_size.x).min(stage_rect.height() / tex_size.y);
+                // Keep 16:9 proportions un-squished while the clipped stage smoothly expands/collapses
+                let full_rect = Rect::from_center_size(stage_rect.center(), Vec2::new(w, full_h));
+                let scale = (full_rect.width() / tex_size.x).min(full_rect.height() / tex_size.y);
                 let draw_size = tex_size * scale;
                 let draw_rect = Rect::from_center_size(stage_rect.center(), draw_size);
-                paint_rounded_image(&painter, draw_rect, tex.id(), 12);
+                paint_rounded_image_tinted(&painter, draw_rect, tex.id(), 12, img_tint);
             }
-        } else {
+        } else if ease > 0.45 {
             painter.text(
                 stage_rect.center(),
                 egui::Align2::CENTER_CENTER,
                 "Memuat video…",
                 FontId::proportional(12.0),
-                TEXT_DIMMED,
+                Color32::from_rgba_unmultiplied(
+                    TEXT_DIMMED.r(),
+                    TEXT_DIMMED.g(),
+                    TEXT_DIMMED.b(),
+                    (255.0 * ease).round() as u8,
+                ),
             );
         }
         painter.rect_stroke(
             stage_rect,
             stage_r,
-            Stroke::new(1.0, Color32::from_rgba_unmultiplied(255, 255, 255, 30)),
+            Stroke::new(
+                1.0,
+                Color32::from_rgba_unmultiplied(255, 255, 255, (30.0 * ease).round() as u8),
+            ),
             StrokeKind::Inside,
         );
 
@@ -1606,28 +1628,30 @@ impl NadaApp {
             }
         });
 
-        // Floating Glisse PiP button top-right
-        let pip_rect = Rect::from_min_size(
-            Pos2::new(stage_rect.right() - 42.0, stage_rect.top() + 8.0),
-            Vec2::new(32.0, 32.0),
-        );
-        let mut child = ui.new_child(egui::UiBuilder::new().max_rect(pip_rect));
-        let pip_variant = if self.pip_open {
-            GlisseVariant::ActiveTint(ACCENT_BRASS)
-        } else {
-            GlisseVariant::Glass
-        };
-        if glisse_icon_button(
-            &mut child,
-            "stage_pip_btn",
-            IconKind::Pip,
-            Vec2::new(32.0, 32.0),
-            pip_variant,
-        )
-        .on_hover_text("Picture in Picture")
-        .clicked()
-        {
-            self.pip_open = !self.pip_open;
+        // Floating Glisse PiP button top-right (visible once stage is mostly open)
+        if ease > 0.65 {
+            let pip_rect = Rect::from_min_size(
+                Pos2::new(stage_rect.right() - 42.0, stage_rect.top() + 8.0),
+                Vec2::new(32.0, 32.0),
+            );
+            let mut child = ui.new_child(egui::UiBuilder::new().max_rect(pip_rect));
+            let pip_variant = if self.pip_open {
+                GlisseVariant::ActiveTint(ACCENT_BRASS)
+            } else {
+                GlisseVariant::Glass
+            };
+            if glisse_icon_button(
+                &mut child,
+                "stage_pip_btn",
+                IconKind::Pip,
+                Vec2::new(32.0, 32.0),
+                pip_variant,
+            )
+            .on_hover_text("Picture in Picture")
+            .clicked()
+            {
+                self.pip_open = !self.pip_open;
+            }
         }
     }
 
@@ -1741,7 +1765,7 @@ impl NadaApp {
         }
     }
 
-    fn render_player_dock(&mut self, ui: &mut Ui, snap: &MediaSnapshot) {
+    fn render_player_dock(&mut self, ui: &mut Ui, snap: &MediaSnapshot, video_ease: f32) {
         let ctx = ui.ctx().clone();
         let dur = self.effective_duration(snap);
         let cur = self.seeking_val.unwrap_or(snap.position_secs).clamp(0.0, dur.max(0.0));
@@ -2068,9 +2092,8 @@ impl NadaApp {
                     Color32::from_rgba_unmultiplied(0, 0, 0, 96),
                 ));
 
-                // 2. Seamless frosted dark glass body: extra translucent during video mode
-                //    so the live blurred ambient backdrop softly glows through and around the dock
-                let dock_alpha = if self.want_video && !self.pip_open { 174 } else { 220 };
+                // 2. Seamless frosted dark glass body: smoothly crossfades translucency with video_ease
+                let dock_alpha = (220.0 - 46.0 * video_ease).round().clamp(170.0, 224.0) as u8;
                 glass_shapes.push(Shape::rect_filled(
                     dock_rect,
                     radius,
@@ -2719,15 +2742,17 @@ impl eframe::App for NadaApp {
             });
 
         let video_inline = self.want_video && !self.pip_open;
+        // Smooth cubic ease-out motion for video stage & ambient blur hide/show
+        let video_t = ctx.animate_bool_with_time(Id::new("video_stage_anim"), video_inline, 0.24);
+        let video_ease = 1.0 - (1.0 - video_t).powi(3);
 
         egui::CentralPanel::default()
             .frame(Frame::new().fill(BG_STUDIO))
             .show(ui, |ui| {
                 self.render_main_body(ui);
 
-                // When video is playing inline, softly blur & frost the background area outside
-                // the video stage and floating player dock using the live blurred video frame.
-                if video_inline {
+                // Smoothly fade the ambient blurred video backdrop over the background area
+                if video_ease > 0.005 {
                     let body_rect = ui.max_rect();
                     let painter = ui.painter_at(body_rect);
                     if let Some(blur_tex) = &self.video_blur_tex {
@@ -2735,25 +2760,39 @@ impl eframe::App for NadaApp {
                             blur_tex.id(),
                             body_rect,
                             Rect::from_min_max(Pos2::ZERO, Pos2::new(1.0, 1.0)),
-                            Color32::from_rgba_unmultiplied(255, 255, 255, 195),
+                            Color32::from_rgba_unmultiplied(
+                                255,
+                                255,
+                                255,
+                                (195.0 * video_ease).round() as u8,
+                            ),
                         );
                         painter.rect_filled(
                             body_rect,
                             CornerRadius::ZERO,
-                            Color32::from_rgba_unmultiplied(10, 11, 16, 138),
+                            Color32::from_rgba_unmultiplied(
+                                10,
+                                11,
+                                16,
+                                (138.0 * video_ease).round() as u8,
+                            ),
                         );
                     } else {
                         painter.rect_filled(
                             body_rect,
                             CornerRadius::ZERO,
-                            Color32::from_rgba_unmultiplied(10, 11, 16, 170),
+                            Color32::from_rgba_unmultiplied(
+                                10,
+                                11,
+                                16,
+                                (170.0 * video_ease).round() as u8,
+                            ),
                         );
                     }
                 }
             });
 
-        // Floating Video Stage + Liquid Glass Player Dock: transparent margins around both
-        // let the live blurred video ambient backdrop shine through cleanly.
+        // Floating Video Stage + Liquid Glass Player Dock: smoothly animates height & opacity
         let screen = ctx.content_rect();
         let dock_w = (screen.width() - 20.0).max(260.0);
         egui::Area::new(Id::unique("nada_floating_dock"))
@@ -2762,19 +2801,19 @@ impl eframe::App for NadaApp {
             .constrain_to(screen)
             .show(&ctx, |ui| {
                 ui.set_width(dock_w);
-                if video_inline {
-                    self.render_video_stage(ui);
-                    ui.add_space(10.0);
+                if video_ease > 0.005 {
+                    self.render_video_stage(ui, video_ease);
+                    ui.add_space(10.0 * video_ease);
                 }
-                self.render_player_dock(ui, &snap);
+                self.render_player_dock(ui, &snap, video_ease);
             });
 
         self.render_queue_drawer(&ctx);
         self.render_toast(&ctx);
         self.render_pip_viewport(&ctx, &snap);
 
-        if snap.playing || snap.loading {
-            ctx.request_repaint_after(Duration::from_millis(33));
+        if (video_t > 0.001 && video_t < 0.999) || snap.playing || snap.loading {
+            ctx.request_repaint_after(Duration::from_millis(16));
         } else {
             ctx.request_repaint_after(Duration::from_millis(250));
         }

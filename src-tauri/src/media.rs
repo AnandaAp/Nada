@@ -7,8 +7,8 @@ use std::time::{Duration, Instant};
 
 use rodio::buffer::SamplesBuffer;
 use rodio::{ChannelCount, DeviceSinkBuilder, MixerDeviceSink, Player, Sample, SampleRate, Source};
-use rust_h264::decoder::{ChromaFormat, Decoder as H264Decoder, Frame as H264Frame};
-use rust_h264::nal::{parse_avcc, parse_avcc_config, NalUnitType};
+use rust_h264::decoder::{ChromaFormat, Frame as H264Frame, OrderedDecoder as H264OrderedDecoder};
+use rust_h264::nal::{parse_avcc, parse_avcc_config};
 use symphonia::default::{register_enabled_codecs, register_enabled_formats};
 use symphonia_core::codecs::audio::AudioDecoderOptions;
 use symphonia_core::codecs::registry::CodecRegistry;
@@ -1175,14 +1175,14 @@ fn run_video_worker(
     };
     let length_size = avcc.length_size;
 
-    let mut h264 = H264Decoder::new();
-    let feed_sps_pps = |dec: &mut H264Decoder| {
+    let mut h264: H264OrderedDecoder<f64> = H264OrderedDecoder::with_max_depth(6);
+    let feed_sps_pps = |dec: &mut H264OrderedDecoder<f64>| {
         if let Ok(cfg) = parse_avcc_config(&avcc_bytes) {
             for sps in &cfg.sps_nals {
-                let _ = dec.decode_nal(sps);
+                let _ = dec.decode_nal_with_meta(sps, 0.0);
             }
             for pps in &cfg.pps_nals {
-                let _ = dec.decode_nal(pps);
+                let _ = dec.decode_nal_with_meta(pps, 0.0);
             }
         }
     };
@@ -1200,9 +1200,9 @@ fn run_video_worker(
         }
     }
 
-    let mut frame_queue: VecDeque<(u64, i32, f64, H264Frame)> = VecDeque::new();
-    let mut pts_history: VecDeque<f64> = VecDeque::new();
-    let mut gop_id: u64 = 0;
+    // Frames emitted by OrderedDecoder are already in exact display order with true per-frame PTS
+    let mut frame_queue: VecDeque<(f64, H264Frame)> = VecDeque::new();
+    let mut last_presented_pts: f64 = -1.0;
 
     while !cancel.load(Ordering::Acquire) {
         let mut seek_target: Option<f64> = None;
@@ -1211,9 +1211,8 @@ fn run_video_worker(
         }
         if let Some(target_secs) = seek_target {
             frame_queue.clear();
-            pts_history.clear();
-            gop_id = gop_id.wrapping_add(1);
-            h264 = H264Decoder::new();
+            last_presented_pts = -1.0;
+            h264 = H264OrderedDecoder::with_max_depth(6);
             feed_sps_pps(&mut h264);
             if let Some(t) = f64_to_symphonia_time(target_secs) {
                 let _ = reader.seek(
@@ -1230,13 +1229,13 @@ fn run_video_worker(
         // Compensate ~45ms WASAPI hardware output buffer so video matches heard audio
         let audio_secs = (clock.current_secs() - 0.045).max(0.0);
 
-        // Present ready frames in display order (sorted by (gop_id, pic_order_cnt))
-        if let Some((_, _, next_pts, _)) = frame_queue.front() {
+        // Present ready frames in display order
+        if let Some((next_pts, _)) = frame_queue.front() {
             let diff = *next_pts - audio_secs;
             if diff <= 0.020 {
-                let (_, _, pts, yuv) = frame_queue.pop_front().unwrap();
-                // Skip converting late frames if > 250ms behind master audio clock and more frames queued
-                if diff >= -0.250 || frame_queue.is_empty() {
+                let (pts, yuv) = frame_queue.pop_front().unwrap();
+                // Skip converting late frames if > 200ms behind master audio clock and more frames queued
+                if diff >= -0.200 || frame_queue.is_empty() {
                     let (w, h, rgba) = yuv_frame_to_rgba(&yuv);
                     let vf = VideoRgbaFrame {
                         width: w,
@@ -1272,83 +1271,53 @@ fn run_video_worker(
                     .and_then(|tb| tb.calc_time(packet.pts))
                     .map(|t| t.as_secs_f64())
                     .unwrap_or(audio_secs);
-                pts_history.push_back(pkt_secs);
-                // Keep sorted timestamps for B-frame reordering
-                let mut pts_vec: Vec<f64> = pts_history.iter().copied().collect();
-                pts_vec.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
-                pts_history = pts_vec.into();
 
                 let nals = parse_avcc(&packet.data, length_size);
                 for nal in &nals {
-                    let is_idr = nal.nal_unit_type == NalUnitType::SliceIdr;
-                    if is_idr {
-                        gop_id = gop_id.wrapping_add(1);
-                    }
-                    if let Ok(Some(frame)) = h264.decode_nal(nal) {
-                        let pts = pts_history.pop_front().unwrap_or(pkt_secs);
-                        if !first_frame_signaled {
-                            first_frame_signaled = true;
-                            let (w, h, rgba) = yuv_frame_to_rgba(&frame);
-                            {
-                                let mut snap = shared.lock().unwrap();
-                                if snap.session_id == session_id {
-                                    snap.latest_frame = Some(VideoRgbaFrame {
-                                        width: w,
-                                        height: h,
-                                        rgba: Arc::from(rgba),
-                                        pts_secs: pts,
-                                    });
+                    if let Ok(emitted) = h264.decode_nal_with_meta(nal, pkt_secs) {
+                        for (frame, raw_pts) in emitted {
+                            // Keep display timestamps monotonic across B-frame DTS/PTS variance (~1-2 frames)
+                            let pts = if last_presented_pts >= 0.0 && raw_pts < last_presented_pts {
+                                last_presented_pts + 0.033
+                            } else {
+                                raw_pts
+                            };
+                            last_presented_pts = pts;
+
+                            if !first_frame_signaled {
+                                first_frame_signaled = true;
+                                let (w, h, rgba) = yuv_frame_to_rgba(&frame);
+                                {
+                                    let mut snap = shared.lock().unwrap();
+                                    if snap.session_id == session_id {
+                                        snap.latest_frame = Some(VideoRgbaFrame {
+                                            width: w,
+                                            height: h,
+                                            rgba: Arc::from(rgba),
+                                            pts_secs: pts,
+                                        });
+                                    }
                                 }
-                            }
-                            notify_ui(&repaint);
-                            ready_guard.signal();
-                        } else {
-                            let poc = frame.pic_order_cnt;
-                            frame_queue.push_back((gop_id, poc, pts, frame));
-                            if is_idr || frame_queue.len() >= 4 {
-                                let mut v: Vec<_> = frame_queue.drain(..).collect();
-                                v.sort_by_key(|(g, p, _, _)| (*g, *p));
-                                frame_queue.extend(v);
+                                notify_ui(&repaint);
+                                ready_guard.signal();
+                            } else {
+                                frame_queue.push_back((pts, frame));
                             }
                         }
                     }
                 }
             }
             Ok(None) => {
-                if let Some(frame) = h264.flush() {
-                    let pts = pts_history.pop_front().unwrap_or(audio_secs);
-                    let (w, h, rgba) = yuv_frame_to_rgba(&frame);
-                    let mut snap = shared.lock().unwrap();
-                    if snap.session_id == session_id {
-                        snap.latest_frame = Some(VideoRgbaFrame {
-                            width: w,
-                            height: h,
-                            rgba: Arc::from(rgba),
-                            pts_secs: pts,
-                        });
-                    }
-                    drop(snap);
-                    notify_ui(&repaint);
+                for (frame, pts) in h264.flush_with_meta() {
+                    frame_queue.push_back((pts, frame));
                 }
                 std::thread::sleep(Duration::from_millis(40));
             }
             Err(SymphoniaError::IoError(err))
                 if err.kind() == io::ErrorKind::UnexpectedEof =>
             {
-                if let Some(frame) = h264.flush() {
-                    let pts = pts_history.pop_front().unwrap_or(audio_secs);
-                    let (w, h, rgba) = yuv_frame_to_rgba(&frame);
-                    let mut snap = shared.lock().unwrap();
-                    if snap.session_id == session_id {
-                        snap.latest_frame = Some(VideoRgbaFrame {
-                            width: w,
-                            height: h,
-                            rgba: Arc::from(rgba),
-                            pts_secs: pts,
-                        });
-                    }
-                    drop(snap);
-                    notify_ui(&repaint);
+                for (frame, pts) in h264.flush_with_meta() {
+                    frame_queue.push_back((pts, frame));
                 }
                 std::thread::sleep(Duration::from_millis(40));
             }

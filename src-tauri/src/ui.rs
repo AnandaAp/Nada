@@ -2743,7 +2743,7 @@ impl eframe::App for NadaApp {
 
         let video_inline = self.want_video && !self.pip_open;
         // Smooth cubic ease-out motion for video stage & ambient blur hide/show
-        let video_t = ctx.animate_bool_with_time(Id::new("video_stage_anim"), video_inline, 0.24);
+        let video_t = ctx.animate_bool_with_time(Id::unique("video_stage_anim"), video_inline, 0.24);
         let video_ease = 1.0 - (1.0 - video_t).powi(3);
 
         egui::CentralPanel::default()

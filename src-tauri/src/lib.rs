@@ -8,7 +8,7 @@ use rustypipe::param::{Country, Language};
 use serde::Serialize;
 use serde_json::Value;
 use single_instance::SingleInstance;
-use tray_icon::menu::{Menu, MenuEvent, MenuItem};
+use tray_icon::menu::{CheckMenuItem, Menu, MenuEvent, MenuItem};
 use tray_icon::{Icon, MouseButton, MouseButtonState, TrayIconBuilder, TrayIconEvent};
 
 pub mod bg_engine;
@@ -529,6 +529,100 @@ fn apply_win32_window_icons(cc: &eframe::CreationContext<'_>) {
     });
 }
 
+#[cfg(windows)]
+pub(crate) mod run_at_startup {
+    use windows_sys::Win32::Foundation::ERROR_SUCCESS;
+    use windows_sys::Win32::System::Registry::{
+        RegCloseKey, RegCreateKeyExW, RegDeleteValueW, RegQueryValueExW, RegSetValueExW, HKEY,
+        HKEY_CURRENT_USER, KEY_READ, KEY_WRITE, REG_SZ,
+    };
+
+    const RUN_KEY: &str = "Software\\Microsoft\\Windows\\CurrentVersion\\Run";
+    const VALUE_NAME: &str = "Nada";
+
+    fn wide(s: &str) -> Vec<u16> {
+        s.encode_utf16().chain(std::iter::once(0)).collect()
+    }
+
+    fn open_key() -> Option<HKEY> {
+        let sub = wide(RUN_KEY);
+        let mut key: HKEY = std::ptr::null_mut();
+        let status = unsafe {
+            RegCreateKeyExW(
+                HKEY_CURRENT_USER,
+                sub.as_ptr(),
+                0,
+                std::ptr::null(),
+                0,
+                KEY_READ | KEY_WRITE,
+                std::ptr::null(),
+                &mut key,
+                std::ptr::null_mut(),
+            )
+        };
+        (status == ERROR_SUCCESS).then_some(key)
+    }
+
+    pub fn is_enabled() -> bool {
+        let Some(key) = open_key() else {
+            return false;
+        };
+        let name = wide(VALUE_NAME);
+        let status = unsafe {
+            RegQueryValueExW(
+                key,
+                name.as_ptr(),
+                std::ptr::null_mut(),
+                std::ptr::null_mut(),
+                std::ptr::null_mut(),
+                std::ptr::null_mut(),
+            )
+        };
+        unsafe { RegCloseKey(key) };
+        status == ERROR_SUCCESS
+    }
+
+    pub fn set_enabled(enabled: bool) -> bool {
+        let Some(key) = open_key() else {
+            return false;
+        };
+        let name = wide(VALUE_NAME);
+        let status = if enabled {
+            let cmd = match std::env::current_exe() {
+                Ok(exe) => wide(&format!("\"{}\"", exe.display())),
+                Err(_) => {
+                    unsafe { RegCloseKey(key) };
+                    return false;
+                }
+            };
+            unsafe {
+                RegSetValueExW(
+                    key,
+                    name.as_ptr(),
+                    0,
+                    REG_SZ,
+                    cmd.as_ptr() as *const u8,
+                    (cmd.len() * 2) as u32,
+                )
+            }
+        } else {
+            unsafe { RegDeleteValueW(key, name.as_ptr()) }
+        };
+        unsafe { RegCloseKey(key) };
+        status == ERROR_SUCCESS
+    }
+}
+
+#[cfg(not(windows))]
+pub(crate) mod run_at_startup {
+    pub fn is_enabled() -> bool {
+        false
+    }
+    pub fn set_enabled(_enabled: bool) -> bool {
+        false
+    }
+}
+
 fn try_wake_existing_instance(wake_port_path: &std::path::Path) {
     let Ok(raw) = std::fs::read_to_string(wake_port_path) else {
         return;
@@ -588,17 +682,24 @@ pub fn run() {
     let (tray_tx, tray_rx) = mpsc::channel::<ui::TrayCmd>();
     let allow_quit = Arc::new(AtomicBool::new(false));
 
-    // Set up native OS system tray (Buka Nada / Play-Pause / Keluar).
+    // Set up native OS system tray (Buka Nada / Play-Pause / Run at startup / Keluar).
     // IMPORTANT: `tray_handle` MUST live in `run()` for the entire lifetime of `eframe::run_native`
     // (NOT moved into the AppCreator closure where it would be dropped immediately after startup).
     let menu = Menu::new();
     let show_item = MenuItem::new("Buka Nada", true, None);
     let toggle_item = MenuItem::new("Play / Pause", true, None);
+    let startup_item = CheckMenuItem::new(
+        "Jalankan saat startup",
+        true,
+        run_at_startup::is_enabled(),
+        None,
+    );
     let quit_item = MenuItem::new("Keluar", true, None);
     let show_id = show_item.id().clone();
     let toggle_id = toggle_item.id().clone();
+    let startup_id = startup_item.id().clone();
     let quit_id = quit_item.id().clone();
-    let _ = menu.append_items(&[&show_item, &toggle_item, &quit_item]);
+    let _ = menu.append_items(&[&show_item, &toggle_item, &startup_item, &quit_item]);
 
     let mut tray_builder = TrayIconBuilder::new()
         .with_menu(Box::new(menu))
@@ -663,6 +764,8 @@ pub fn run() {
                     ctx_menu.send_viewport_cmd(egui::ViewportCommand::Focus);
                 } else if event.id == toggle_id {
                     let _ = tx_menu.send(ui::TrayCmd::TogglePlay);
+                } else if event.id == startup_id {
+                    let _ = tx_menu.send(ui::TrayCmd::ToggleStartup);
                 } else if event.id == quit_id {
                     allow_quit_menu.store(true, std::sync::atomic::Ordering::Release);
                     let _ = tx_menu.send(ui::TrayCmd::Quit);
@@ -696,6 +799,7 @@ pub fn run() {
                 rt_handle,
                 tray_rx,
                 tooltip_cb,
+                startup_item,
                 allow_quit,
                 has_tray,
             )))

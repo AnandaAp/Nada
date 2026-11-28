@@ -11,6 +11,7 @@ use egui::{
 
 use crate::media::{MediaEngine, MediaSnapshot, PlayRequest, StreamInput};
 use crate::{Backend, HomeItem, StreamsResponse, Track};
+use tray_icon::menu::CheckMenuItem;
 
 // ============================================================================
 // iLaras v2.0 + Glisse Liquid Glass Design Tokens
@@ -682,6 +683,7 @@ enum AsyncEvent {
 pub enum TrayCmd {
     ShowWindow,
     TogglePlay,
+    ToggleStartup,
     Quit,
 }
 
@@ -693,6 +695,7 @@ pub struct NadaApp {
     ev_rx: mpsc::Receiver<AsyncEvent>,
     tray_rx: mpsc::Receiver<TrayCmd>,
     tray_tooltip_cb: Option<Box<dyn Fn(&str) + Send>>,
+    startup_item: CheckMenuItem,
     allow_quit: Arc<AtomicBool>,
     has_tray: bool,
 
@@ -736,6 +739,7 @@ impl NadaApp {
         rt: tokio::runtime::Handle,
         tray_rx: mpsc::Receiver<TrayCmd>,
         tray_tooltip_cb: Option<Box<dyn Fn(&str) + Send>>,
+        startup_item: CheckMenuItem,
         allow_quit: Arc<AtomicBool>,
         has_tray: bool,
     ) -> Self {
@@ -792,6 +796,7 @@ impl NadaApp {
             ev_rx,
             tray_rx,
             tray_tooltip_cb,
+            startup_item,
             allow_quit,
             has_tray,
             view: ActiveView::Home,
@@ -1141,6 +1146,13 @@ impl NadaApp {
                 }
                 TrayCmd::TogglePlay => {
                     self.toggle_play(snap, ctx);
+                }
+                TrayCmd::ToggleStartup => {
+                    // muda toggles the check state before dispatching the menu event.
+                    let enabled = self.startup_item.is_checked();
+                    if !crate::run_at_startup::set_enabled(enabled) {
+                        self.startup_item.set_checked(!enabled);
+                    }
                 }
                 TrayCmd::Quit => {
                     self.allow_quit.store(true, Ordering::Release);

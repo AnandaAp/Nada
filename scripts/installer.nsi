@@ -79,6 +79,7 @@ Section "Nada Desktop Player" SecMain
 
   ; Notify Windows Shell to refresh shortcut & taskbar icon cache immediately
   System::Call 'shell32::SHChangeNotify(i 0x08000000, i 0, p 0, p 0)'
+  nsExec::ExecToLog '"$SYSDIR\ie4uinit.exe" -show'
 SectionEnd
 
 Section "Uninstall"
@@ -94,4 +95,5 @@ Section "Uninstall"
   DeleteRegKey HKCU "Software\Microsoft\Windows\CurrentVersion\Uninstall\Nada"
   DeleteRegKey HKCU "Software\Nada"
   System::Call 'shell32::SHChangeNotify(i 0x08000000, i 0, p 0, p 0)'
+  nsExec::ExecToLog '"$SYSDIR\ie4uinit.exe" -show'
 SectionEnd

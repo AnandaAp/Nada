@@ -1,12 +1,12 @@
 use std::collections::VecDeque;
 use std::io::{self, Read, Seek, SeekFrom};
 use std::num::NonZero;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{mpsc, Arc, Condvar, Mutex};
 use std::time::{Duration, Instant};
 
 use rodio::buffer::SamplesBuffer;
-use rodio::{DeviceSinkBuilder, MixerDeviceSink, Player};
+use rodio::{ChannelCount, DeviceSinkBuilder, MixerDeviceSink, Player, Sample, SampleRate, Source};
 use rust_h264::decoder::{ChromaFormat, Decoder as H264Decoder, Frame as H264Frame};
 use rust_h264::nal::{parse_avcc, parse_avcc_config, NalUnitType};
 use symphonia::default::{register_enabled_codecs, register_enabled_formats};
@@ -534,7 +534,6 @@ fn run_media_coordinator(
             EngineCmd::SetPaused(paused) => {
                 if let Some(w) = &active {
                     w.pause_flag.store(paused, Ordering::Release);
-                    w.clock.set_paused(paused);
                 }
                 if let Some(p) = &player_opt {
                     if paused {
@@ -589,67 +588,142 @@ fn run_media_coordinator(
 }
 
 // ============================================================================
-// Audio + Video Decode Session (Master Audio Clock + Synchronized H.264 Stage)
+// Audio + Video Decode Session (Hardware-Sample-Locked Audio Clock + H.264)
 // ============================================================================
 
-struct ClockInner {
-    accumulated_secs: f64,
-    running_since: Option<Instant>,
-    started: bool,
-}
-
 struct AudioClock {
-    inner: Mutex<ClockInner>,
+    epoch: AtomicU64,
+    anchor_pts_us: AtomicU64,
+    played_us: AtomicU64,
+    anchored: AtomicBool,
 }
 
 impl AudioClock {
     fn new(start_secs: f64) -> Self {
         Self {
-            inner: Mutex::new(ClockInner {
-                accumulated_secs: start_secs.max(0.0),
-                running_since: None,
-                started: false,
-            }),
+            epoch: AtomicU64::new(1),
+            anchor_pts_us: AtomicU64::new((start_secs.max(0.0) * 1_000_000.0) as u64),
+            played_us: AtomicU64::new(0),
+            anchored: AtomicBool::new(false),
         }
     }
 
-    fn on_audio_pushed(&self, paused: bool) {
-        let mut g = self.inner.lock().unwrap();
-        if !g.started {
-            g.started = true;
-            if !paused {
-                g.running_since = Some(Instant::now());
-            }
-        } else if !paused && g.running_since.is_none() {
-            g.running_since = Some(Instant::now());
+    fn reset(&self, media_secs: f64) -> u64 {
+        let next_epoch = self.epoch.fetch_add(1, Ordering::AcqRel) + 1;
+        self.anchor_pts_us
+            .store((media_secs.max(0.0) * 1_000_000.0) as u64, Ordering::Release);
+        self.played_us.store(0, Ordering::Release);
+        self.anchored.store(false, Ordering::Release);
+        next_epoch
+    }
+
+    fn current_epoch(&self) -> u64 {
+        self.epoch.load(Ordering::Acquire)
+    }
+
+    fn anchor_first_packet(&self, pkt_secs: f64) {
+        if !self.anchored.swap(true, Ordering::AcqRel) && pkt_secs.is_finite() && pkt_secs >= 0.0 {
+            self.anchor_pts_us
+                .store((pkt_secs * 1_000_000.0) as u64, Ordering::Release);
         }
     }
 
-    fn set_paused(&self, paused: bool) {
-        let mut g = self.inner.lock().unwrap();
-        if paused {
-            if let Some(since) = g.running_since.take() {
-                g.accumulated_secs += since.elapsed().as_secs_f64();
-            }
-        } else if g.started && g.running_since.is_none() {
-            g.running_since = Some(Instant::now());
+    fn add_played_us(&self, epoch: u64, delta_us: u64) {
+        if delta_us > 0 && self.epoch.load(Ordering::Acquire) == epoch {
+            self.played_us.fetch_add(delta_us, Ordering::Relaxed);
         }
-    }
-
-    fn reset(&self, media_secs: f64) {
-        let mut g = self.inner.lock().unwrap();
-        g.accumulated_secs = media_secs.max(0.0);
-        g.running_since = None;
-        g.started = false;
     }
 
     fn current_secs(&self) -> f64 {
-        let g = self.inner.lock().unwrap();
-        let extra = g
-            .running_since
-            .map(|t| t.elapsed().as_secs_f64())
-            .unwrap_or(0.0);
-        g.accumulated_secs + extra
+        let base = self.anchor_pts_us.load(Ordering::Acquire);
+        let played = self.played_us.load(Ordering::Acquire);
+        (base.saturating_add(played)) as f64 / 1_000_000.0
+    }
+}
+
+/// Wraps a `SamplesBuffer` and advances `AudioClock` in lockstep with the actual samples
+/// consumed by rodio's audio output mixer thread (auto-pauses on pause or buffer underrun).
+struct TrackedSamples {
+    inner: SamplesBuffer,
+    clock: Arc<AudioClock>,
+    epoch: u64,
+    samples_per_sec: u64,
+    pending_samples: u64,
+    rem_num: u64,
+}
+
+impl TrackedSamples {
+    fn new(inner: SamplesBuffer, clock: Arc<AudioClock>, epoch: u64, rate: u32, ch: u16) -> Self {
+        Self {
+            inner,
+            clock,
+            epoch,
+            samples_per_sec: (rate as u64 * ch as u64).max(1),
+            pending_samples: 0,
+            rem_num: 0,
+        }
+    }
+
+    #[inline]
+    fn flush_played(&mut self) {
+        if self.pending_samples > 0 {
+            let num = self.pending_samples * 1_000_000 + self.rem_num;
+            let us = num / self.samples_per_sec;
+            self.rem_num = num % self.samples_per_sec;
+            self.pending_samples = 0;
+            self.clock.add_played_us(self.epoch, us);
+        }
+    }
+}
+
+impl Drop for TrackedSamples {
+    fn drop(&mut self) {
+        self.flush_played();
+    }
+}
+
+impl Iterator for TrackedSamples {
+    type Item = Sample;
+
+    #[inline]
+    fn next(&mut self) -> Option<Self::Item> {
+        let item = self.inner.next();
+        if item.is_some() {
+            self.pending_samples += 1;
+            if self.pending_samples >= 256 {
+                self.flush_played();
+            }
+        } else {
+            self.flush_played();
+        }
+        item
+    }
+
+    #[inline]
+    fn size_hint(&self) -> (usize, Option<usize>) {
+        self.inner.size_hint()
+    }
+}
+
+impl Source for TrackedSamples {
+    #[inline]
+    fn current_span_len(&self) -> Option<usize> {
+        self.inner.current_span_len()
+    }
+
+    #[inline]
+    fn channels(&self) -> ChannelCount {
+        self.inner.channels()
+    }
+
+    #[inline]
+    fn sample_rate(&self) -> SampleRate {
+        self.inner.sample_rate()
+    }
+
+    #[inline]
+    fn total_duration(&self) -> Option<Duration> {
+        self.inner.total_duration()
     }
 }
 
@@ -772,7 +846,7 @@ fn run_playback_session(
         }
     }
 
-    let Some((mut audio_reader, audio_track_id, _audio_tb, detected_dur)) = opened_audio else {
+    let Some((mut audio_reader, audio_track_id, audio_tb, detected_dur)) = opened_audio else {
         let mut snap = shared.lock().unwrap();
         if snap.session_id == req.session_id {
             snap.loading = false;
@@ -988,26 +1062,39 @@ fn run_playback_session(
                     continue;
                 }
                 if let Ok(decoded) = audio_decoder.decode(&packet) {
+                    if let Some(pkt_secs) = audio_tb
+                        .and_then(|tb| tb.calc_time(packet.pts))
+                        .map(|t| t.as_secs_f64())
+                    {
+                        clock.anchor_first_packet(pkt_secs);
+                    }
                     let rate = decoded.spec().rate();
                     let ch = decoded.spec().channels().count() as u16;
                     if rate > 0 && ch > 0 {
                         interleaved.clear();
                         decoded.copy_to_vec_interleaved(&mut interleaved);
                         if !interleaved.is_empty() {
+                            let epoch = clock.current_epoch();
                             if let Some(p) = &player {
                                 if let (Some(nz_ch), Some(nz_rate)) =
                                     (NonZero::new(ch), NonZero::new(rate))
                                 {
                                     let buf =
                                         SamplesBuffer::new(nz_ch, nz_rate, interleaved.clone());
-                                    p.append(buf);
-                                    clock.on_audio_pushed(pause_flag.load(Ordering::Acquire));
+                                    let tracked = TrackedSamples::new(
+                                        buf,
+                                        clock.clone(),
+                                        epoch,
+                                        rate,
+                                        ch,
+                                    );
+                                    p.append(tracked);
                                 }
                             } else {
-                                clock.on_audio_pushed(pause_flag.load(Ordering::Acquire));
-                                let dur_ms = (interleaved.len() as u64 * 1000)
+                                let dur_us = (interleaved.len() as u64 * 1_000_000)
                                     / (rate as u64 * ch as u64).max(1);
-                                std::thread::sleep(Duration::from_millis(dur_ms.min(50)));
+                                std::thread::sleep(Duration::from_micros(dur_us.min(50_000)));
+                                clock.add_played_us(epoch, dur_us);
                             }
                         }
                     }
@@ -1142,7 +1229,8 @@ fn run_video_worker(
         }
 
         let paused = pause_flag.load(Ordering::Acquire);
-        let audio_secs = clock.current_secs();
+        // Compensate ~45ms WASAPI hardware output buffer so video matches heard audio
+        let audio_secs = (clock.current_secs() - 0.045).max(0.0);
 
         // Present ready frames in display order (sorted by (gop_id, pic_order_cnt))
         if let Some((_, _, next_pts, _)) = frame_queue.front() {

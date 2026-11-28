@@ -1455,7 +1455,7 @@ impl NadaApp {
                                     )
                                     .frame(Frame::NONE)
                                     .margin(Margin::ZERO)
-                                    .vertical_align(Align::Center)
+                                    .align(egui::Align2::LEFT_CENTER)
                                     .desired_width(avail_w)
                                     .text_color(TEXT_MAIN);
                                 let resp = ui.add_sized(Vec2::new(avail_w, row_h), edit);

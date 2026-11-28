@@ -1076,13 +1076,14 @@ impl NadaApp {
     fn toggle_video_mode(&mut self, snap: &MediaSnapshot, ctx: &egui::Context) {
         self.want_video = !self.want_video;
         if !self.want_video {
+            // Hide the video player without interrupting or resetting active playback
             self.pip_open = false;
-            self.video_tex = None;
-            self.video_blur_tex = None;
+            return;
         }
-        if self.current_track().is_some() {
+        // Only start the video stream if the current session wasn't already decoding video
+        if self.current_track().is_some() && !snap.video_active && !snap.loading {
             let pos = snap.position_secs;
-            let playing = snap.playing || snap.loading;
+            let playing = snap.playing;
             self.start_current_track(pos, playing, ctx.clone());
         }
     }

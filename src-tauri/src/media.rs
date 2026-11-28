@@ -452,7 +452,6 @@ struct ActiveWorker {
     cancel: Arc<AtomicBool>,
     seek_tx: mpsc::Sender<f64>,
     pause_flag: Arc<AtomicBool>,
-    clock: Arc<AudioClock>,
 }
 
 fn notify_ui(repaint: &Option<Arc<dyn Fn() + Send + Sync>>) {
@@ -508,7 +507,6 @@ fn run_media_coordinator(
                     cancel: cancel.clone(),
                     seek_tx,
                     pause_flag: pause_flag.clone(),
-                    clock: clock.clone(),
                 });
 
                 let player_clone = player_opt.clone();

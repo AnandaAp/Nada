@@ -1435,55 +1435,62 @@ impl NadaApp {
                     .fill(SURFACE_PANEL)
                     .stroke(Stroke::new(1.0, Color32::from_rgba_unmultiplied(255, 255, 255, 22)))
                     .corner_radius(CornerRadius::same(14))
-                    .inner_margin(Margin::symmetric(10, 4))
+                    .inner_margin(Margin::symmetric(12, 4))
                     .show(ui, |ui| {
-                        ui.horizontal(|ui| {
-                            let avail_w = (ui.available_width()
-                                - if self.search_query.is_empty() {
-                                    32.0
+                        let row_h = 26.0;
+                        ui.allocate_ui_with_layout(
+                            Vec2::new(ui.available_width(), row_h),
+                            Layout::left_to_right(Align::Center),
+                            |ui| {
+                                ui.spacing_mut().item_spacing.x = 4.0;
+                                let buttons_w = if self.search_query.is_empty() {
+                                    30.0
                                 } else {
-                                    62.0
-                                })
-                            .max(120.0);
-                            let edit = egui::TextEdit::singleline(&mut self.search_query)
-                                .hint_text(
-                                    RichText::new("Cari lagu atau video…").color(TEXT_DIMMED),
-                                )
-                                .frame(Frame::NONE)
-                                .desired_width(avail_w)
-                                .text_color(TEXT_MAIN);
-                            let resp = ui.add(edit);
-                            if resp.lost_focus() && ui.input(|i| i.key_pressed(Key::Enter)) {
-                                self.trigger_search(ctx.clone());
-                            }
+                                    60.0
+                                };
+                                let avail_w = (ui.available_width() - buttons_w).max(120.0);
+                                let edit = egui::TextEdit::singleline(&mut self.search_query)
+                                    .hint_text(
+                                        RichText::new("Cari lagu atau video…").color(TEXT_DIMMED),
+                                    )
+                                    .frame(Frame::NONE)
+                                    .margin(Margin::ZERO)
+                                    .vertical_align(Align::Center)
+                                    .desired_width(avail_w)
+                                    .text_color(TEXT_MAIN);
+                                let resp = ui.add_sized(Vec2::new(avail_w, row_h), edit);
+                                if resp.lost_focus() && ui.input(|i| i.key_pressed(Key::Enter)) {
+                                    self.trigger_search(ctx.clone());
+                                }
 
-                            if !self.search_query.is_empty()
-                                && glisse_icon_button(
+                                if !self.search_query.is_empty()
+                                    && glisse_icon_button(
+                                        ui,
+                                        "clear_search",
+                                        IconKind::Clear,
+                                        Vec2::new(26.0, 26.0),
+                                        GlisseVariant::Ghost,
+                                    )
+                                    .on_hover_text("Hapus pencarian")
+                                    .clicked()
+                                {
+                                    self.search_query.clear();
+                                }
+
+                                if glisse_icon_button(
                                     ui,
-                                    "clear_search",
-                                    IconKind::Clear,
+                                    "search_btn",
+                                    IconKind::Search,
                                     Vec2::new(26.0, 26.0),
                                     GlisseVariant::Ghost,
                                 )
-                                .on_hover_text("Hapus pencarian")
+                                .on_hover_text("Cari")
                                 .clicked()
-                            {
-                                self.search_query.clear();
-                            }
-
-                            if glisse_icon_button(
-                                ui,
-                                "search_btn",
-                                IconKind::Search,
-                                Vec2::new(26.0, 26.0),
-                                GlisseVariant::Ghost,
-                            )
-                            .on_hover_text("Cari")
-                            .clicked()
-                            {
-                                self.trigger_search(ctx.clone());
-                            }
-                        });
+                                {
+                                    self.trigger_search(ctx.clone());
+                                }
+                            },
+                        );
                     });
 
                 ui.add_space(8.0);

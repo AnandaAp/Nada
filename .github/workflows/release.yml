@@ -146,6 +146,7 @@ jobs:
           $portableFolder = "release-extra/Nada-v$version-portable"
           New-Item -ItemType Directory -Force -Path $portableFolder
           Copy-Item "src-tauri/target/release/nada.exe" "$portableFolder/nada.exe"
+          Copy-Item "src-tauri/icons/icon.ico" "$portableFolder/icon.ico"
           Copy-Item "LICENSE" "$portableFolder/LICENSE" -ErrorAction SilentlyContinue
           Copy-Item "README.md" "$portableFolder/README.md" -ErrorAction SilentlyContinue
           if (Test-Path "certificates/Nada-PublicCert.cer") {

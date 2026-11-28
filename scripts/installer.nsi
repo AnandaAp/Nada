@@ -54,16 +54,19 @@ Section "Nada Desktop Player" SecMain
   WriteUninstaller "$INSTDIR\Uninstall.exe"
 
   CreateDirectory "$SMPROGRAMS\Nada"
-  CreateShortcut "$SMPROGRAMS\Nada\Nada.lnk" "$INSTDIR\nada.exe" "" "$INSTDIR\icon.ico"
-  CreateShortcut "$DESKTOP\Nada.lnk" "$INSTDIR\nada.exe" "" "$INSTDIR\icon.ico"
+  CreateShortcut "$SMPROGRAMS\Nada\Nada.lnk" "$INSTDIR\nada.exe" "" "$INSTDIR\icon.ico" 0
+  CreateShortcut "$DESKTOP\Nada.lnk" "$INSTDIR\nada.exe" "" "$INSTDIR\icon.ico" 0
 
   WriteRegStr HKCU "Software\Microsoft\Windows\CurrentVersion\Uninstall\Nada" "DisplayName" "Nada"
   WriteRegStr HKCU "Software\Microsoft\Windows\CurrentVersion\Uninstall\Nada" "DisplayVersion" "${VERSION}"
   WriteRegStr HKCU "Software\Microsoft\Windows\CurrentVersion\Uninstall\Nada" "Publisher" "Ananda"
-  WriteRegStr HKCU "Software\Microsoft\Windows\CurrentVersion\Uninstall\Nada" "DisplayIcon" "$INSTDIR\nada.exe"
+  WriteRegStr HKCU "Software\Microsoft\Windows\CurrentVersion\Uninstall\Nada" "DisplayIcon" "$INSTDIR\icon.ico"
   WriteRegStr HKCU "Software\Microsoft\Windows\CurrentVersion\Uninstall\Nada" "UninstallString" "$\"$INSTDIR\Uninstall.exe$\""
   WriteRegDWORD HKCU "Software\Microsoft\Windows\CurrentVersion\Uninstall\Nada" "NoModify" 1
   WriteRegDWORD HKCU "Software\Microsoft\Windows\CurrentVersion\Uninstall\Nada" "NoRepair" 1
+
+  ; Notify Windows Shell to refresh shortcut & taskbar icon cache immediately
+  System::Call 'shell32::SHChangeNotify(i 0x08000000, i 0, p 0, p 0)'
 SectionEnd
 
 Section "Uninstall"
@@ -78,4 +81,5 @@ Section "Uninstall"
 
   DeleteRegKey HKCU "Software\Microsoft\Windows\CurrentVersion\Uninstall\Nada"
   DeleteRegKey HKCU "Software\Nada"
+  System::Call 'shell32::SHChangeNotify(i 0x08000000, i 0, p 0, p 0)'
 SectionEnd
